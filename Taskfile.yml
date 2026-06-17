@@ -1,0 +1,27 @@
+version: '3'
+
+tasks:
+  build:
+    desc: Build the plexus binary
+    cmds:
+      - go build -o bin/plexus ./internal/bin/plexus
+
+  run:
+    desc: Run the plexus binary
+    cmds:
+      - go run ./internal/bin/plexus
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test -v -count=1 ./...
+
+  test:smoke:
+    desc: Run smoke tests
+    cmds:
+      - go test -v -count=1 ./test/smoke_test.go
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run
