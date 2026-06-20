@@ -3,7 +3,7 @@ package openai
 import (
 	"context"
 
-	"plexus/agent/llm"
+	"plexus/pkg/llm"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"

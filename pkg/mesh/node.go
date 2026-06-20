@@ -1,7 +1,7 @@
-// Package agent provides the node SDK for the Plexus mesh.
+// Package mesh provides the node SDK for the Plexus mesh.
 // It allows individual services to connect to the mesh, register themselves,
 // join broadcast or queue groups, and exchange messages.
-package agent
+package mesh
 
 import (
 	"context"
@@ -15,8 +15,8 @@ import (
 	"plexus/protocol"
 )
 
-// Agent represents a Plexus mesh node
-type Agent struct {
+// Node represents a Plexus mesh node
+type Node struct {
 	ID      string
 	Options Options
 	nc      *nats.Conn
@@ -26,14 +26,14 @@ type Agent struct {
 	pendingGroup map[string]string // key: topic/group, value: queueName (empty if broadcast)
 }
 
-// New creates a new Agent instance
-func New(id string, opts ...Option) *Agent {
+// NewNode creates a new Node instance
+func NewNode(id string, opts ...Option) *Node {
 	options := DefaultOptions()
 	for _, o := range opts {
 		o(&options)
 	}
 
-	return &Agent{
+	return &Node{
 		ID:           id,
 		Options:      options,
 		groups:       make(map[string]*nats.Subscription),
@@ -42,10 +42,10 @@ func New(id string, opts ...Option) *Agent {
 }
 
 // Run connects to NATS and starts listening for commands
-func (a *Agent) Run(ctx context.Context) error {
+func (a *Node) Run(ctx context.Context) error {
 	if a.Options.NatsConn != nil {
 		a.nc = a.Options.NatsConn
-		slog.Info("Agent utilizing injected NATS connection", "id", a.ID)
+		slog.Info("Node utilizing injected NATS connection", "id", a.ID)
 	} else {
 		nc, err := nats.Connect(a.Options.NatsURL)
 		if err != nil {
@@ -63,7 +63,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			sub, err := a.nc.Subscribe(topic, a.handleMessage)
 			if err == nil {
 				a.groups[group] = sub
-				slog.Info("Agent joined broadcast group", "id", a.ID, "group", group)
+				slog.Info("Node joined broadcast group", "id", a.ID, "group", group)
 			}
 		} else {
 			topic := a.Options.QueuePrefix + group
@@ -71,7 +71,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			sub, err := a.nc.QueueSubscribe(topic, queue, a.handleMessage)
 			if err == nil {
 				a.groups[key] = sub
-				slog.Info("Agent joined queue group", "id", a.ID, "group", group, "queue", queue)
+				slog.Info("Node joined queue group", "id", a.ID, "group", group, "queue", queue)
 			}
 		}
 	}
@@ -98,7 +98,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("Agent shutting down", "id", a.ID)
+			slog.Info("Node shutting down", "id", a.ID)
 			return nil
 		case <-ticker.C:
 			// Ping / Heartbeat can go here
@@ -107,14 +107,14 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // handleMessage is the universal receiver for all Message envelope types
-func (a *Agent) handleMessage(m *nats.Msg) {
+func (a *Node) handleMessage(m *nats.Msg) {
 	var msg protocol.Message
 	if err := json.Unmarshal(m.Data, &msg); err != nil {
 		slog.Error("Failed to unmarshal message", "err", err)
 		return
 	}
 
-	slog.Debug("Agent received message", "type", msg.Type.String(), "sender", msg.Sender)
+	slog.Debug("Node received message", "type", msg.Type.String(), "sender", msg.Sender)
 
 	// Trigger the callback if configured
 	if a.Options.OnMessage != nil {
@@ -123,7 +123,7 @@ func (a *Agent) handleMessage(m *nats.Msg) {
 }
 
 // JoinGroup subscribes to a broadcast group (Fan-out mode)
-func (a *Agent) JoinGroup(ctx context.Context, group string) error {
+func (a *Node) JoinGroup(ctx context.Context, group string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -145,12 +145,12 @@ func (a *Agent) JoinGroup(ctx context.Context, group string) error {
 		return err
 	}
 	a.groups[group] = sub
-	slog.Info("Agent joined broadcast group", "id", a.ID, "group", group)
+	slog.Info("Node joined broadcast group", "id", a.ID, "group", group)
 	return nil
 }
 
 // JoinQueueGroup subscribes to a task group (Load-Balanced mode)
-func (a *Agent) JoinQueueGroup(ctx context.Context, group string, queueName string) error {
+func (a *Node) JoinQueueGroup(ctx context.Context, group string, queueName string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -173,12 +173,12 @@ func (a *Agent) JoinQueueGroup(ctx context.Context, group string, queueName stri
 		return err
 	}
 	a.groups[key] = sub
-	slog.Info("Agent joined queue group", "id", a.ID, "group", group, "queue", queueName)
+	slog.Info("Node joined queue group", "id", a.ID, "group", group, "queue", queueName)
 	return nil
 }
 
 // LeaveGroup unsubscribes from a group
-func (a *Agent) LeaveGroup(ctx context.Context, key string) error {
+func (a *Node) LeaveGroup(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -194,8 +194,8 @@ func (a *Agent) LeaveGroup(ctx context.Context, key string) error {
 	return nil
 }
 
-// SendMessage sends a P2P message to another Agent
-func (a *Agent) SendMessage(ctx context.Context, target string, payload []byte) error {
+// SendMessage sends a P2P message to another Node
+func (a *Node) SendMessage(ctx context.Context, target string, payload []byte) error {
 	msg := protocol.Message{
 		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 		Sender:    a.ID,
@@ -209,12 +209,12 @@ func (a *Agent) SendMessage(ctx context.Context, target string, payload []byte) 
 }
 
 // SendRaw marshals a Message and publishes it to a raw NATS subject
-func (a *Agent) SendRaw(ctx context.Context, subject string, msg protocol.Message) error {
+func (a *Node) SendRaw(ctx context.Context, subject string, msg protocol.Message) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if a.nc == nil {
-		return fmt.Errorf("agent not connected")
+		return fmt.Errorf("node not connected")
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {

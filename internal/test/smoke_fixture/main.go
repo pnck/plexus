@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"plexus/agent"
 	"plexus/internal/logger"
+	"plexus/pkg/mesh"
 	"plexus/protocol"
 )
 
@@ -34,10 +34,10 @@ func main() {
 	defer cancel()
 
 	slog.Info("Starting test-agent", "id", *agentID)
-	var a *agent.Agent
-	a = agent.New(*agentID, 
-		agent.WithNatsURL(*natsURL),
-		agent.WithOnMessage(func(msg protocol.Message) {
+	var a *mesh.Node
+	a = mesh.NewNode(*agentID, 
+		mesh.WithNatsURL(*natsURL),
+		mesh.WithOnMessage(func(msg protocol.Message) {
 			reportMsg := protocol.Message{
 				Sender:  *agentID,
 				Target:  "server",

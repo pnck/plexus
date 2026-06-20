@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"plexus/agent/llm"
+	"plexus/pkg/llm"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -53,7 +53,7 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	for _, t := range tools {
 		var schema anthropic.ToolInputSchemaParam
 		if b, err := json.Marshal(t.Parameters); err == nil {
-			json.Unmarshal(b, &schema)
+			_ = json.Unmarshal(b, &schema)
 		}
 		anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{

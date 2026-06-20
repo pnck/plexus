@@ -8,7 +8,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-	"plexus/agent"
+	"plexus/pkg/mesh"
 	"plexus/sandbox"
 	"plexus/sandbox/bwrap"
 )
@@ -31,7 +31,7 @@ var runCmd = &cobra.Command{
 		defer cancel()
 
 		slog.Info("Starting plexus daemon", "id", agentID, "sandboxed", sandboxed)
-		a := agent.New(agentID, agent.WithNatsURL(natsURL))
+		a := mesh.NewNode(agentID, mesh.WithNatsURL(natsURL))
 
 		return a.Run(ctx)
 	},
