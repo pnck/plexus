@@ -54,7 +54,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Listen for agent registrations
 	regSub, err := s.nc.Subscribe(s.Options.RegisterSubject, func(m *nats.Msg) {
-		agentID := string(m.Data)
+		var reg protocol.Message
+		if err := json.Unmarshal(m.Data, &reg); err != nil {
+			slog.Error("Failed to unmarshal registration", "err", err)
+			return
+		}
+		agentID := reg.Sender
 		s.mu.Lock()
 		s.agents = append(s.agents, agentID)
 		s.mu.Unlock()

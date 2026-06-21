@@ -86,8 +86,14 @@ func (a *Node) Run(ctx context.Context) error {
 	}
 	defer func() { _ = inboxSub.Unsubscribe() }()
 
-	// 2. Register with Control Plane
-	if err := a.nc.Publish(a.Options.RegisterSubject, []byte(a.ID)); err != nil {
+	// 2. Register with Control Plane (via the standard envelope, no raw bytes)
+	regMsg := protocol.Message{
+		ID:        fmt.Sprintf("reg-%d", time.Now().UnixNano()),
+		Sender:    a.ID,
+		Type:      protocol.TypeRegister,
+		Timestamp: time.Now().Unix(),
+	}
+	if err := a.SendRaw(ctx, a.Options.RegisterSubject, regMsg); err != nil {
 		slog.Error("Failed to send registration", "err", err)
 	}
 
