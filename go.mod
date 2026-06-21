@@ -4,6 +4,7 @@ go 1.25.4
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.2
+	github.com/chzyer/readline v1.5.1
 	github.com/nats-io/nats-server/v2 v2.14.2
 	github.com/nats-io/nats.go v1.52.0
 	github.com/openai/openai-go v1.12.0

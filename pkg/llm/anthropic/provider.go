@@ -3,6 +3,8 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 
 	"plexus/pkg/llm"
 
@@ -18,14 +20,65 @@ type Provider struct {
 	MaxTokens int64
 }
 
+// opts holds optional configuration for the provider constructor.
+type opts struct {
+	baseURL    string
+	middleware []llm.HTTPMiddleware
+}
+
+// Option configures the provider via the functional-option pattern.
+type Option func(*opts)
+
+// WithBaseURL overrides the API base URL.
+func WithBaseURL(url string) Option {
+	return func(o *opts) {
+		o.baseURL = url
+	}
+}
+
+// WithMiddleware registers HTTP middleware (e.g. request/response logging).
+func WithMiddleware(mw llm.HTTPMiddleware) Option {
+	return func(o *opts) {
+		o.middleware = append(o.middleware, mw)
+	}
+}
+
 // NewProvider creates a new Anthropic provider.
-func NewProvider(apiKey, model string) *Provider {
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+func NewProvider(apiKey, model string, options ...Option) *Provider {
+	var o opts
+	for _, fn := range options {
+		fn(&o)
+	}
+
+	reqOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if o.baseURL != "" {
+		reqOpts = append(reqOpts, option.WithBaseURL(o.baseURL))
+	}
+	for _, mw := range o.middleware {
+		reqOpts = append(reqOpts, option.WithMiddleware(mw))
+	}
+
+	client := anthropic.NewClient(reqOpts...)
 	return &Provider{
 		client:    &client,
 		model:     model,
 		MaxTokens: 8192, // TODO: figure out proper value
 	}
+}
+
+// ListModels enumerates the model IDs available to the configured account via
+// the Anthropic /models endpoint, returning them sorted. It satisfies llm.ModelLister.
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	var ids []string
+	pager := p.client.Models.ListAutoPaging(ctx, anthropic.ModelListParams{})
+	for pager.Next() {
+		ids = append(ids, pager.Current().ID)
+	}
+	if err := pager.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // GenerateStream calls the Anthropic Messages streaming API.
@@ -81,24 +134,92 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	return &anthropicStream{stream: stream}, nil
 }
 
+// pendingToolBlock accumulates a tool_use content block across input_json_delta events.
+type pendingToolBlock struct {
+	id    string
+	name  string
+	input strings.Builder
+}
+
 type anthropicStream struct {
 	stream  *ssestream.Stream[anthropic.MessageStreamEventUnion]
 	current llm.StreamEvent
+
+	// pending queues assembled tool-call events so Next() can yield them one at a time.
+	pending []llm.StreamEvent
+
+	// blocks maps a content-block index to its in-progress tool_use accumulation.
+	blocks map[int64]*pendingToolBlock
+
+	// usage accumulates token counts: input from message_start, output from message_delta.
+	usage llm.Usage
 }
 
 func (s *anthropicStream) Next() bool {
-	if !s.stream.Next() {
-		return false
+	// Drain queued assembled events first.
+	if len(s.pending) > 0 {
+		s.current = s.pending[0]
+		s.pending = s.pending[1:]
+		return true
 	}
 
-	_ = s.stream.Current()
-	event := llm.StreamEvent{}
+	for s.stream.Next() {
+		switch ev := s.stream.Current().AsAny().(type) {
+		case anthropic.MessageStartEvent:
+			// Input usage is reported up front.
+			s.usage.PromptTokens = ev.Message.Usage.InputTokens
 
-	// Basic mapping. Need to properly switch on union variants.
-	// event.DeltaText = ...
+		case anthropic.ContentBlockStartEvent:
+			// A tool_use block opening — start accumulating its input JSON.
+			block := ev.ContentBlock
+			if block.Type == "tool_use" {
+				if s.blocks == nil {
+					s.blocks = map[int64]*pendingToolBlock{}
+				}
+				s.blocks[ev.Index] = &pendingToolBlock{id: block.ID, name: block.Name}
+			}
 
-	s.current = event
-	return true
+		case anthropic.ContentBlockDeltaEvent:
+			switch delta := ev.Delta.AsAny().(type) {
+			case anthropic.TextDelta:
+				if delta.Text != "" {
+					s.current = llm.StreamEvent{DeltaText: delta.Text}
+					return true
+				}
+			case anthropic.InputJSONDelta:
+				if pb, ok := s.blocks[ev.Index]; ok {
+					pb.input.WriteString(delta.PartialJSON)
+				}
+			}
+
+		case anthropic.ContentBlockStopEvent:
+			// A tool_use block closed — emit the assembled ToolCall.
+			if pb, ok := s.blocks[ev.Index]; ok {
+				delete(s.blocks, ev.Index)
+				s.current = llm.StreamEvent{
+					ToolCall: &llm.ToolCall{
+						ID:        pb.id,
+						Name:      pb.name,
+						Arguments: pb.input.String(),
+					},
+				}
+				return true
+			}
+
+		case anthropic.MessageDeltaEvent:
+			// Carries stop_reason and the final (cumulative) output usage.
+			s.usage.CompletionTokens = ev.Usage.OutputTokens
+			s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
+			usage := s.usage
+			s.current = llm.StreamEvent{
+				FinishReason: string(ev.Delta.StopReason),
+				Usage:        &usage,
+			}
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *anthropicStream) Current() llm.StreamEvent {

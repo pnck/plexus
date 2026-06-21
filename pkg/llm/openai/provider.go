@@ -2,6 +2,8 @@ package openai
 
 import (
 	"context"
+	"sort"
+	"strings"
 
 	"plexus/pkg/llm"
 
@@ -17,13 +19,64 @@ type Provider struct {
 	model  string
 }
 
+// opts holds optional configuration for the provider constructor.
+type opts struct {
+	baseURL    string
+	middleware []llm.HTTPMiddleware
+}
+
+// Option configures the provider via the functional-option pattern.
+type Option func(*opts)
+
+// WithBaseURL overrides the API base URL (e.g. for OpenAI-compatible gateways).
+func WithBaseURL(url string) Option {
+	return func(o *opts) {
+		o.baseURL = url
+	}
+}
+
+// WithMiddleware registers HTTP middleware (e.g. request/response logging).
+func WithMiddleware(mw llm.HTTPMiddleware) Option {
+	return func(o *opts) {
+		o.middleware = append(o.middleware, mw)
+	}
+}
+
 // NewProvider creates a new OpenAI provider.
-func NewProvider(apiKey, model string) *Provider {
-	client := openai.NewClient(option.WithAPIKey(apiKey))
+func NewProvider(apiKey, model string, options ...Option) *Provider {
+	var o opts
+	for _, fn := range options {
+		fn(&o)
+	}
+
+	reqOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if o.baseURL != "" {
+		reqOpts = append(reqOpts, option.WithBaseURL(o.baseURL))
+	}
+	for _, mw := range o.middleware {
+		reqOpts = append(reqOpts, option.WithMiddleware(mw))
+	}
+
+	client := openai.NewClient(reqOpts...)
 	return &Provider{
 		client: &client,
 		model:  model,
 	}
+}
+
+// ListModels enumerates the model IDs available to the configured account via
+// the OpenAI /models endpoint, returning them sorted. It satisfies llm.ModelLister.
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	var ids []string
+	pager := p.client.Models.ListAutoPaging(ctx)
+	for pager.Next() {
+		ids = append(ids, pager.Current().ID)
+	}
+	if err := pager.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // GenerateStream calls the OpenAI Chat Completions streaming API.
@@ -79,6 +132,10 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	params := openai.ChatCompletionNewParams{
 		Model:    shared.ChatModel(p.model),
 		Messages: oaiMsgs,
+		// Request a final usage chunk after generation completes.
+		StreamOptions: openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: openai.Bool(true),
+		},
 	}
 	if len(oaiTools) > 0 {
 		params.Tools = oaiTools
@@ -90,45 +147,122 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	return &openaiStream{stream: stream}, nil
 }
 
+// pendingToolCall accumulates fragmented tool-call deltas across chunks, keyed by Index.
+type pendingToolCall struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
 type openaiStream struct {
 	stream  *ssestream.Stream[openai.ChatCompletionChunk]
 	current llm.StreamEvent
+
+	// pending holds tool-call and terminal events assembled at generation end,
+	// to be yielded one-by-one by Next().
+	pending []llm.StreamEvent
+
+	// toolCalls accumulates tool-call fragments by Index; order preserves arrival.
+	toolCalls map[int64]*pendingToolCall
+	toolOrder []int64
+
+	finishReason string
+	usage        *llm.Usage
+	flushed      bool
 }
 
 func (s *openaiStream) Next() bool {
-	if !s.stream.Next() {
-		return false
+	// Drain any assembled events queued from a finished generation first.
+	if len(s.pending) > 0 {
+		s.current = s.pending[0]
+		s.pending = s.pending[1:]
+		return true
 	}
 
-	chunk := s.stream.Current()
-	event := llm.StreamEvent{}
+	for s.stream.Next() {
+		chunk := s.stream.Current()
 
-	if len(chunk.Choices) > 0 {
-		choice := chunk.Choices[0]
-
-		// Check for text delta
-		if choice.Delta.Content != "" {
-			event.DeltaText = choice.Delta.Content
-		}
-
-		// Check for tool calls delta
-		if len(choice.Delta.ToolCalls) > 0 {
-			tc := choice.Delta.ToolCalls[0]
-			event.ToolCall = &llm.ToolCall{
-				ID:        tc.ID,
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
+		// Usage arrives on its own terminal chunk (choices empty).
+		if chunk.Usage.TotalTokens != 0 || chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 {
+			s.usage = &llm.Usage{
+				PromptTokens:     chunk.Usage.PromptTokens,
+				CompletionTokens: chunk.Usage.CompletionTokens,
+				TotalTokens:      chunk.Usage.TotalTokens,
 			}
 		}
 
-		// Check finish reason
-		if choice.FinishReason != "" {
-			event.FinishReason = string(choice.FinishReason)
+		if len(chunk.Choices) > 0 {
+			choice := chunk.Choices[0]
+
+			// Accumulate tool-call fragments by Index across chunks.
+			for _, tc := range choice.Delta.ToolCalls {
+				pending, ok := s.toolCalls[tc.Index]
+				if !ok {
+					pending = &pendingToolCall{}
+					if s.toolCalls == nil {
+						s.toolCalls = map[int64]*pendingToolCall{}
+					}
+					s.toolCalls[tc.Index] = pending
+					s.toolOrder = append(s.toolOrder, tc.Index)
+				}
+				if tc.ID != "" {
+					pending.id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					pending.name = tc.Function.Name
+				}
+				pending.args.WriteString(tc.Function.Arguments)
+			}
+
+			if choice.FinishReason != "" {
+				s.finishReason = string(choice.FinishReason)
+			}
+
+			// Text deltas are emitted immediately as they arrive.
+			if choice.Delta.Content != "" {
+				s.current = llm.StreamEvent{DeltaText: choice.Delta.Content}
+				return true
+			}
+		}
+
+		// A non-empty text delta is the only thing yielded mid-stream above;
+		// otherwise keep reading until the stream ends.
+	}
+
+	// Stream ended: assemble tool calls and the terminal event exactly once.
+	if !s.flushed {
+		s.flushed = true
+		s.assembleFinalEvents()
+		if len(s.pending) > 0 {
+			s.current = s.pending[0]
+			s.pending = s.pending[1:]
+			return true
 		}
 	}
 
-	s.current = event
-	return true
+	return false
+}
+
+// assembleFinalEvents builds the queue of tool-call events plus the terminal event.
+func (s *openaiStream) assembleFinalEvents() {
+	for _, idx := range s.toolOrder {
+		pc := s.toolCalls[idx]
+		s.pending = append(s.pending, llm.StreamEvent{
+			ToolCall: &llm.ToolCall{
+				ID:        pc.id,
+				Name:      pc.name,
+				Arguments: pc.args.String(),
+			},
+		})
+	}
+
+	// Terminal event carries finish reason and usage.
+	if s.finishReason != "" || s.usage != nil {
+		s.pending = append(s.pending, llm.StreamEvent{
+			FinishReason: s.finishReason,
+			Usage:        s.usage,
+		})
+	}
 }
 
 func (s *openaiStream) Current() llm.StreamEvent {

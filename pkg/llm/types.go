@@ -37,6 +37,13 @@ type ToolDefinition struct {
 	Parameters any
 }
 
+// Usage reports token consumption for a generation.
+type Usage struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+}
+
 // StreamEvent represents a single event in the streaming response.
 type StreamEvent struct {
 	// DeltaText is the newly generated text chunk.
@@ -47,6 +54,9 @@ type StreamEvent struct {
 
 	// FinishReason indicates why generation stopped (e.g., "stop", "tool_calls", "length").
 	FinishReason string
+
+	// Usage is populated on the terminal event when the provider reports token usage.
+	Usage *Usage
 
 	// Error captures any error that occurred during streaming.
 	Error error
