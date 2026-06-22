@@ -45,27 +45,31 @@ const (
 
 // Message is the standard envelope for all communications in Plexus.
 type Message struct {
-	// —— Existing (preserved) ——
-	ID        string      `json:"id"`        // Unique message identifier
-	Sender    string      `json:"sender"`    // Agent ID or System component
-	Target    string      `json:"target"`    // Target Agent ID or Group Name
-	Type      MessageType `json:"type"`      // The type of the message
-	Payload   []byte      `json:"payload"`   // The actual data
-	Timestamp int64       `json:"timestamp"` // Unix timestamp
+	// —— Identity / routing ——
+	// ID is the message id; it ALSO serves as the JetStream Nats-Msg-Id dedup key
+	// for idempotent at-least-once delivery. One id — there is no separate MessageID.
+	ID        string      `json:"id"`
+	Sender    string      `json:"sender"` // the SOURCE: agent/instance/system that sent it (the "who")
+	Target    string      `json:"target"` // target agent id or group name
+	Type      MessageType `json:"type"`
+	Payload   []byte      `json:"payload"`
+	Timestamp int64       `json:"timestamp"`
 
-	// —— Dedup / correlation (JetStream, §5.6/§5.7.3) ——
-	MessageID     string `json:"message_id"`     // = JetStream Nats-Msg-Id; stable idempotency key for at-least-once dedup
-	CorrelationID string `json:"correlation_id"` // ask↔answer correlation (yield/resume, §5.7.5)
-	ReplyTo       string `json:"reply_to"`       // Reply address — placeholder, semantics not locked (pending D2)
+	// —— Correlation ——
+	CorrelationID string `json:"correlation_id"` // ask↔answer pairing (yield/resume, §5.7.5)
+	ReplyTo       string `json:"reply_to"`       // reply address — placeholder, semantics pending D2
 
-	// —— Authority layering (brain enforces layered rendering, §5.7.3) ——
-	Authority  Authority `json:"authority"`  // L1..L5
-	Provenance string    `json:"provenance"` // Source marker (role card / user / tool / control plane / memory)
+	// —— Authority: the trust TIER. The source is `Sender`; there is no separate
+	// free-form provenance field — one field, one meaning. ——
+	Authority Authority `json:"authority"` // L1..L5 (§5.7.3)
 
-	// —— Addressing anchors / audit (§5.7.3, accountability loop §4.5) ——
-	NodeID    string `json:"node_id"`    // DAG node anchor (§4.2) — the agent's task-view unit
-	SessionID string `json:"session_id"` // Session identifier
-	TraceID   string `json:"trace_id"`   // Audit trace identifier
-	// NOTE: no ProjectID. "project" is not a transport concept (agents only have a
-	// DAG task view; multi-project is a control-plane/domain concern in E5). Decision 2026-06-21 / D1.
+	// —— Addressing / observability ——
+	// TaskID is the unit of work this message pertains to (concrete, agent-level).
+	// It replaces the old "node_id": a DAG node is an Inspark-domain mapping with no
+	// concrete meaning to the standalone agent SDK; the agent only knows "a task".
+	TaskID    string `json:"task_id"`
+	SessionID string `json:"session_id"` // the session
+	// TraceID follows ONE causal chain (ask → … → answer) across messages/hops for
+	// observability/audit — distinct from TaskID, which groups a work unit's messages.
+	TraceID string `json:"trace_id"`
 }
