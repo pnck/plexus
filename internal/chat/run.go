@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/chzyer/readline"
@@ -43,7 +44,17 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 		agentID = "chat-agent"
 	}
 
-	ns, err := server.StartEmbeddedNATS(port)
+	// Ephemeral JetStream store: this chat session is non-persisted (the SQLite
+	// DB is :memory: too), so the store lives in a temp dir cleaned on exit. Within
+	// the session the durable inbox still survives an agent-consumer reconnect;
+	// cross-process resume (persistent store) is a deployment concern, not chat's.
+	storeDir, err := os.MkdirTemp("", "plexus-chat-js-*")
+	if err != nil {
+		return fmt.Errorf("chat: js store dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(storeDir) }()
+
+	ns, err := server.StartEmbeddedNATS(port, storeDir)
 	if err != nil {
 		return fmt.Errorf("chat: start embedded NATS: %w", err)
 	}

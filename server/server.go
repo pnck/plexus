@@ -12,6 +12,8 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"plexus/pkg/mesh"
 	"plexus/protocol"
 )
 
@@ -20,7 +22,8 @@ import (
 type Server struct {
 	Options Options
 	nc      *nats.Conn
-	
+	js      jetstream.JetStream // durable transport for P2P inbox delivery (E1.2)
+
 	mu     sync.Mutex
 	agents []string
 }
@@ -50,6 +53,17 @@ func (s *Server) Run(ctx context.Context) error {
 		s.nc = nc
 		defer s.nc.Close()
 		slog.Info("Server SDK connected to NATS", "url", s.Options.NatsURL)
+	}
+
+	// JetStream for durable P2P (inbox) delivery. The work stream is provisioned
+	// idempotently — whichever of server/node connects first creates it.
+	js, err := jetstream.New(s.nc)
+	if err != nil {
+		return fmt.Errorf("server failed to init jetstream: %w", err)
+	}
+	s.js = js
+	if _, err := mesh.EnsureAgentWorkStream(ctx, js, s.Options.InboxPrefix); err != nil {
+		return fmt.Errorf("server failed to ensure work stream: %w", err)
 	}
 
 	// Listen for agent registrations
@@ -96,14 +110,18 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// StartEmbeddedNATS is a utility function to spin up an in-process NATS server for local dev/testing.
+// StartEmbeddedNATS spins up an in-process NATS server with JetStream enabled,
+// for local dev/testing. storeDir is the JetStream file-store root (durable across
+// a broker restart); pass an ephemeral temp dir for a non-persisted session.
 // Production environments should rely on a standalone NATS cluster.
-func StartEmbeddedNATS(port int) (*natsserver.Server, error) {
+func StartEmbeddedNATS(port int, storeDir string) (*natsserver.Server, error) {
 	opts := &natsserver.Options{
-		Host:   "127.0.0.1",
-		Port:   port,
-		NoLog:  true,
-		NoSigs: true,
+		Host:      "127.0.0.1",
+		Port:      port,
+		NoLog:     true,
+		NoSigs:    true,
+		JetStream: true,
+		StoreDir:  storeDir,
 	}
 
 	ns, err := natsserver.NewServer(opts)
@@ -131,13 +149,28 @@ func (s *Server) GetRegisteredAgents() []string {
 	return copied
 }
 
-// SendP2P sends a targeted point-to-point message
+// SendP2P sends a targeted point-to-point message over the durable inbox stream
+// (E1.2): at-least-once with Nats-Msg-Id dedup, retained for a disconnected agent
+// and replayed on reconnect.
 func (s *Server) SendP2P(ctx context.Context, agentID string, msg protocol.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.js == nil {
+		return fmt.Errorf("server not connected")
+	}
 	msg.Target = agentID
 	msg.Type = protocol.TypeP2P
-	
+	if msg.ID == "" {
+		msg.ID = fmt.Sprintf("p2p-%d", time.Now().UnixNano())
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
 	inbox := s.Options.InboxPrefix + agentID + ".inbox"
-	return s.send(ctx, inbox, msg)
+	_, err = s.js.Publish(ctx, inbox, data, jetstream.WithMsgID(msg.ID))
+	return err
 }
 
 // SendGroupBroadcast sends a Fan-out replica message to all members of a group

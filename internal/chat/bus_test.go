@@ -41,7 +41,7 @@ type busFixture struct {
 func startBus(t *testing.T, gw llm.Provider, opts ...func(*Config)) *busFixture {
 	t.Helper()
 	port := freePort(t)
-	ns, err := server.StartEmbeddedNATS(port)
+	ns, err := server.StartEmbeddedNATS(port, t.TempDir())
 	if err != nil {
 		t.Fatalf("embedded nats: %v", err)
 	}

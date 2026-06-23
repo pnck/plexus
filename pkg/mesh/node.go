@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"plexus/protocol"
 )
 
@@ -20,6 +21,7 @@ type Node struct {
 	ID      string
 	Options Options
 	nc      *nats.Conn
+	js      jetstream.JetStream // durable transport for the 受治边 inbox (E1.2)
 
 	mu           sync.Mutex
 	groups       map[string]*nats.Subscription
@@ -55,6 +57,14 @@ func (a *Node) Run(ctx context.Context) error {
 		defer a.nc.Close()
 	}
 
+	// JetStream context for the durable 受治边 (inbox). Groups, registration,
+	// reports and observability stay on core NATS (this js is only for the inbox).
+	js, err := jetstream.New(a.nc)
+	if err != nil {
+		return fmt.Errorf("failed to init jetstream: %w", err)
+	}
+	a.js = js
+
 	// Process any groups joined before Run() was called
 	a.mu.Lock()
 	for group, queue := range a.pendingGroup {
@@ -79,12 +89,28 @@ func (a *Node) Run(ctx context.Context) error {
 	a.pendingGroup = make(map[string]string)
 	a.mu.Unlock()
 
-	// 1. Listen on private Inbox (P2P)
-	inboxSub, err := a.nc.Subscribe(a.Options.InboxPrefix+a.ID+".inbox", a.handleMessage)
+	// 1. Listen on private Inbox (P2P) over JetStream: a durable, per-agent
+	// consumer so messages published while this node is down are retained and
+	// replayed on reconnect (§4.1 / E1.2). The work stream is provisioned
+	// idempotently here (the server provisions the same config when it connects).
+	stream, err := EnsureAgentWorkStream(ctx, a.js, a.Options.InboxPrefix)
 	if err != nil {
-		return fmt.Errorf("failed to subscribe to inbox: %w", err)
+		return fmt.Errorf("failed to ensure work stream: %w", err)
 	}
-	defer func() { _ = inboxSub.Unsubscribe() }()
+	inbox := a.Options.InboxPrefix + a.ID + ".inbox"
+	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Durable:       inboxConsumerName(a.ID),
+		FilterSubject: inbox,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create inbox consumer: %w", err)
+	}
+	consumeCtx, err := cons.Consume(a.handleDurable)
+	if err != nil {
+		return fmt.Errorf("failed to start inbox consumer: %w", err)
+	}
+	defer consumeCtx.Stop()
 
 	// 2. Register with Control Plane (via the standard envelope, no raw bytes)
 	regMsg := protocol.Message{
@@ -112,10 +138,22 @@ func (a *Node) Run(ctx context.Context) error {
 	}
 }
 
-// handleMessage is the universal receiver for all Message envelope types
-func (a *Node) handleMessage(m *nats.Msg) {
+// handleMessage is the core-NATS receiver for group (broadcast/queue) traffic.
+func (a *Node) handleMessage(m *nats.Msg) { a.deliver(m.Data) }
+
+// handleDurable is the JetStream receiver for the durable inbox. It acks the
+// message after handing it to the callback: WorkQueue retention prunes the
+// message once acked, and an unacked message (node died mid-handle) is redelivered
+// on reconnect — the persistence guarantee behind yield/resume (§5.7.5 / E1.2).
+func (a *Node) handleDurable(m jetstream.Msg) {
+	a.deliver(m.Data())
+	_ = m.Ack()
+}
+
+// deliver unmarshals an envelope and fans it to the OnMessage callback.
+func (a *Node) deliver(data []byte) {
 	var msg protocol.Message
-	if err := json.Unmarshal(m.Data, &msg); err != nil {
+	if err := json.Unmarshal(data, &msg); err != nil {
 		slog.Error("Failed to unmarshal message", "err", err)
 		return
 	}
@@ -183,7 +221,7 @@ func (a *Node) JoinQueueGroup(ctx context.Context, group string, queueName strin
 	return nil
 }
 
-// SendMessage sends a P2P message to another Node
+// SendMessage sends a P2P message to another Node over the durable inbox stream.
 func (a *Node) SendMessage(ctx context.Context, target string, payload []byte) error {
 	msg := protocol.Message{
 		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
@@ -193,8 +231,26 @@ func (a *Node) SendMessage(ctx context.Context, target string, payload []byte) e
 		Payload:   payload,
 		Timestamp: time.Now().Unix(),
 	}
-	topic := a.Options.InboxPrefix + target + ".inbox"
-	return a.SendRaw(ctx, topic, msg)
+	return a.SendToInbox(ctx, target, msg)
+}
+
+// SendToInbox durably publishes a full envelope to target's inbox. Delivery is
+// at-least-once with dedup keyed on msg.ID (Nats-Msg-Id), so a retried publish is
+// idempotent and a message sent while target is down is replayed on reconnect.
+func (a *Node) SendToInbox(ctx context.Context, target string, msg protocol.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if a.js == nil {
+		return fmt.Errorf("node not connected")
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	subject := a.Options.InboxPrefix + target + ".inbox"
+	_, err = a.js.Publish(ctx, subject, data, jetstream.WithMsgID(msg.ID))
+	return err
 }
 
 // Observe publishes an observability event to ObserveSubject+<id>+"."+kind (e.g.

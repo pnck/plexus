@@ -52,7 +52,7 @@ func TestMeshCommunicationSmoke(t *testing.T) {
 	// clash with a running `plexus chat` or a parallel test on the default 4222).
 	port := freePort(t)
 	natsURL := fmt.Sprintf("nats://127.0.0.1:%d", port)
-	ns, err := server.StartEmbeddedNATS(port)
+	ns, err := server.StartEmbeddedNATS(port, t.TempDir())
 	if err != nil {
 		t.Fatalf("Failed to start embedded NATS: %v", err)
 	}
