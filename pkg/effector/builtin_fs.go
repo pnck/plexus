@@ -1,7 +1,7 @@
 package effector
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -16,20 +16,33 @@ import (
 // they are auto-allowed and stay inside the delegation envelope: an agent (and a
 // delegation) reads, writes, edits and searches files without an approval gate
 // and without spawning a shell. Process execution lives in builtin_exec.go.
+//
+// Positions are BYTE OFFSETS, the one currency shared across the read/find/edit
+// trio: search reports each match's offset, read_file slices a [offset, length)
+// range, and edit_file confines its replace to a [start, end) range. So the agent
+// can locate a string (search → offsets) and act on one specific occurrence
+// (read or edit that range) instead of disambiguating by surrounding context.
 
 // pathArg is the lone-path argument shared by the path-only effectors.
 type pathArg struct {
 	Path string `json:"path" desc:"Filesystem path."`
 }
 
-// ReadFile returns the built-in read_file effector (RiskTag Read). No side
-// effects, so it is auto-allowed and inside the delegation envelope.
+type readFileArgs struct {
+	Path   string `json:"path" desc:"Filesystem path."`
+	Offset int    `json:"offset,omitempty" desc:"Start byte offset (default 0). Pairs with search offsets / stat size."`
+	Length int    `json:"length,omitempty" desc:"Bytes to read from offset (0 or omitted = to end of file)."`
+}
+
+// ReadFile returns the built-in read_file effector (RiskTag Read). With no
+// offset/length it returns the whole file; with them it returns the byte slice
+// [offset, offset+length), clamped to the file's bounds.
 func ReadFile() Effector {
 	return define(spec{
 		Name: "read_file",
-		Desc: "Read the contents of a file at the given path.",
+		Desc: "Read a file. Optionally read just a byte range via offset/length (e.g. an offset from search) instead of the whole file.",
 		Risk: Read,
-	}, func(_ context.Context, in pathArg) (Result, error) {
+	}, func(_ context.Context, in readFileArgs) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
 		}
@@ -37,7 +50,15 @@ func ReadFile() Effector {
 		if err != nil {
 			return toolErr("read_file failed: %v", err), nil
 		}
-		return Result{Content: string(data)}, nil
+		if in.Offset == 0 && in.Length == 0 {
+			return Result{Content: string(data)}, nil // whole file
+		}
+		start := clamp(in.Offset, 0, len(data))
+		end := len(data)
+		if in.Length > 0 {
+			end = clamp(start+in.Length, start, len(data))
+		}
+		return Result{Content: string(data[start:end])}, nil
 	})
 }
 
@@ -132,11 +153,13 @@ type searchArgs struct {
 }
 
 // Search returns the built-in search effector (RiskTag Read): a regexp content
-// search across files, built in so it needs no shell (and thus no approval).
+// search across files, built in so it needs no shell (and thus no approval). It
+// reports EVERY match (not just one per line) with its byte offset, so the agent
+// can read/edit that exact location.
 func Search() Effector {
 	return define(spec{
 		Name: "search",
-		Desc: "Search file contents by regular expression under a path; returns path:line: text matches (capped).",
+		Desc: "Search file contents by regular expression under a path. Reports each match as `path:line:@offset: text`; the @offset byte position feeds read_file (offset/length) and edit_file (start/end).",
 		Risk: Read,
 	}, func(_ context.Context, in searchArgs) (Result, error) {
 		if in.Pattern == "" {
@@ -182,33 +205,35 @@ func Search() Effector {
 	})
 }
 
-// searchFile appends up to budget "path:line: text" matches from one file and
-// returns how many it wrote. Binary (non-UTF-8) files are skipped.
+// searchFile appends up to budget "path:line:@offset: text" matches from one
+// file and returns how many it wrote. Every match (not just the first per line)
+// is reported with its byte offset. Binary (non-UTF-8) files are skipped.
 func searchFile(re *regexp.Regexp, path string, b *strings.Builder, budget int) int {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
-	defer func() { _ = f.Close() }()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	written, line := 0, 0
-	for sc.Scan() {
-		line++
-		text := sc.Text()
-		if line == 1 && !utf8.ValidString(text) {
-			return 0 // looks binary
-		}
-		if written >= budget {
-			break
-		}
-		if re.MatchString(text) {
-			fmt.Fprintf(b, "%s:%d: %s\n", path, line, text)
-			written++
-		}
+	if !utf8.Valid(data) {
+		return 0 // looks binary
 	}
-	return written
+	locs := re.FindAllIndex(data, budget)
+	for _, loc := range locs {
+		off := loc[0]
+		line := 1 + bytes.Count(data[:off], []byte{'\n'})
+		fmt.Fprintf(b, "%s:%d:@%d: %s\n", path, line, off, lineAround(data, off))
+	}
+	return len(locs)
+}
+
+// lineAround returns the text of the line containing byte offset off, with any
+// trailing carriage return stripped.
+func lineAround(data []byte, off int) string {
+	start := bytes.LastIndexByte(data[:off], '\n') + 1 // 0 if no newline before
+	end := len(data)
+	if i := bytes.IndexByte(data[off:], '\n'); i >= 0 {
+		end = off + i
+	}
+	return strings.TrimRight(string(data[start:end]), "\r")
 }
 
 type writeFileArgs struct {
@@ -263,16 +288,21 @@ type editFileArgs struct {
 	Path       string `json:"path"`
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all,omitempty" desc:"Replace every occurrence (default false)."`
+	ReplaceAll bool   `json:"replace_all,omitempty" desc:"Replace every occurrence within the range (default false)."`
+	Start      int    `json:"start,omitempty" desc:"Confine the replace to bytes [start, end) — e.g. to target one of several occurrences using a search offset. Default 0 (file start)."`
+	End        int    `json:"end,omitempty" desc:"End byte offset of the confined range (0 or omitted = end of file)."`
 }
 
 // EditFile returns the built-in edit_file effector (RiskTag Write): exact string
 // replacement (old -> new), Claude-Code style — a uniqueness check unless
-// replace_all is set. It is NOT line/offset based.
+// replace_all is set. The optional start/end byte range confines both the
+// uniqueness check and the replacement to that region, so the agent can target
+// one of several occurrences (located via search offsets) without expanding
+// old_string with surrounding context.
 func EditFile() Effector {
 	return define(spec{
 		Name: "edit_file",
-		Desc: "Replace an exact string in a file. old_string must be unique unless replace_all is true.",
+		Desc: "Replace an exact string in a file. old_string must be unique (or set replace_all). Optionally confine to a byte range [start, end) — e.g. a search offset — to target one specific occurrence.",
 		Risk: Write,
 	}, func(_ context.Context, in editFileArgs) (Result, error) {
 		if in.Path == "" {
@@ -290,24 +320,56 @@ func EditFile() Effector {
 			return toolErr("edit_file failed: %v", err), nil
 		}
 		content := string(data)
-		n := strings.Count(content, in.OldString)
+		// Confine to [start, end) — default the whole file.
+		start := clamp(in.Start, 0, len(content))
+		end := len(content)
+		if in.End > 0 {
+			end = clamp(in.End, start, len(content))
+		}
+		if start > end {
+			return toolErr("invalid range: start (%d) > end (%d)", start, end), nil
+		}
+		ranged := in.Start != 0 || in.End != 0
+		region := content[start:end]
+
+		n := strings.Count(region, in.OldString)
 		switch {
 		case n == 0:
-			return toolErr("old_string not found in %s", in.Path), nil
+			return toolErr("old_string not found in %s%s", in.Path, rangeSuffix(ranged, start, end)), nil
 		case n > 1 && !in.ReplaceAll:
-			return toolErr("old_string is not unique in %s (%d matches); add surrounding context or set replace_all", in.Path, n), nil
+			return toolErr("old_string is not unique in %s%s (%d matches); narrow the range, add context, or set replace_all", in.Path, rangeSuffix(ranged, start, end), n), nil
 		}
-		var updated string
+		var newRegion string
 		if in.ReplaceAll {
-			updated = strings.ReplaceAll(content, in.OldString, in.NewString)
+			newRegion = strings.ReplaceAll(region, in.OldString, in.NewString)
 		} else {
-			updated = strings.Replace(content, in.OldString, in.NewString, 1)
+			newRegion = strings.Replace(region, in.OldString, in.NewString, 1)
 		}
+		updated := content[:start] + newRegion + content[end:]
 		if err := os.WriteFile(in.Path, []byte(updated), info.Mode().Perm()); err != nil {
 			return toolErr("edit_file failed: %v", err), nil
 		}
 		return Result{Content: fmt.Sprintf("edited %s (%d replacement(s))", in.Path, n)}, nil
 	})
+}
+
+// rangeSuffix renders " in [start,end)" when a range was supplied, else "".
+func rangeSuffix(ranged bool, start, end int) string {
+	if !ranged {
+		return ""
+	}
+	return fmt.Sprintf(" in [%d,%d)", start, end)
+}
+
+// clamp returns v constrained to [lo, hi].
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // MakeDir returns the built-in make_dir effector (RiskTag Write).
