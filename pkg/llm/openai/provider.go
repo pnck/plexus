@@ -15,14 +15,16 @@ import (
 
 // Provider implements the llm.Provider interface for OpenAI models using the official SDK.
 type Provider struct {
-	client *openai.Client
-	model  string
+	client          *openai.Client
+	model           string
+	reasoningEffort string // "" | low | medium | high (o-series only)
 }
 
 // opts holds optional configuration for the provider constructor.
 type opts struct {
-	baseURL    string
-	middleware []llm.HTTPMiddleware
+	baseURL         string
+	middleware      []llm.HTTPMiddleware
+	reasoningEffort string
 }
 
 // Option configures the provider via the functional-option pattern.
@@ -39,6 +41,28 @@ func WithBaseURL(url string) Option {
 func WithMiddleware(mw llm.HTTPMiddleware) Option {
 	return func(o *opts) {
 		o.middleware = append(o.middleware, mw)
+	}
+}
+
+// WithReasoningEffort sets the reasoning effort (one of llm.ReasoningEfforts);
+// empty disables it. Mapped to OpenAI's range by openaiEffort.
+func WithReasoningEffort(level string) Option {
+	return func(o *opts) {
+		o.reasoningEffort = level
+	}
+}
+
+// openaiEffort maps a neutral effort tier to OpenAI's reasoning_effort. OpenAI's
+// range is minimal..high, so the agent's higher tiers (xhigh, max) clamp to
+// high. Empty/unknown → "" (not sent).
+func openaiEffort(level string) string {
+	switch level {
+	case llm.EffortMinimal, llm.EffortLow, llm.EffortMedium, llm.EffortHigh:
+		return level
+	case llm.EffortXHigh, llm.EffortMax:
+		return llm.EffortHigh // OpenAI tops out at high
+	default:
+		return ""
 	}
 }
 
@@ -59,8 +83,9 @@ func NewProvider(apiKey, model string, options ...Option) *Provider {
 
 	client := openai.NewClient(reqOpts...)
 	return &Provider{
-		client: &client,
-		model:  model,
+		client:          &client,
+		model:           model,
+		reasoningEffort: o.reasoningEffort,
 	}
 }
 
@@ -106,6 +131,9 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	}
 	if len(oaiTools) > 0 {
 		params.Tools = oaiTools
+	}
+	if e := openaiEffort(p.reasoningEffort); e != "" {
+		params.ReasoningEffort = shared.ReasoningEffort(e)
 	}
 
 	// Initiate the stream

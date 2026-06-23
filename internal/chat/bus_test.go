@@ -253,6 +253,45 @@ func TestBusControlReset(t *testing.T) {
 	}
 }
 
+// blockingGateway streams nothing until ctx is cancelled, then errors — to
+// exercise interrupting a turn mid-generation.
+type blockingGateway struct{ next llm.Provider }
+
+func (g *blockingGateway) GenerateStream(ctx context.Context, msgs []llm.Message, tools []llm.ToolDefinition) (llm.EventStream, error) {
+	// First call (the turn we interrupt) blocks; later calls delegate to next.
+	if g.next != nil {
+		return g.next.GenerateStream(ctx, msgs, tools)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// Ctrl-C (a cancel frame) resets ONLY the in-flight turn: the turn returns
+// "[interrupted]" and the agent stays alive to serve the next turn.
+func TestBusInterruptResetsTurnNotAgent(t *testing.T) {
+	// turn 1 blocks (interrupted); turn 2 uses a real fake reply.
+	gw := &blockingGateway{}
+	fx := startBus(t, gw)
+
+	fx.say(t, "t1", "do something slow")
+	// Give the worker a moment to enter the blocked gateway call.
+	time.Sleep(200 * time.Millisecond)
+	fx.send(t, "t1", Frame{Kind: kindCancel}, "")
+
+	rep := fx.await(t, kindReply)
+	if rep.f.Text != "[interrupted]" {
+		t.Fatalf("interrupted reply = %q, want [interrupted]", rep.f.Text)
+	}
+
+	// The agent is still alive: swap in a working gateway and a second turn works.
+	gw.next = &fakeGateway{turns: []scriptedTurn{{text: "still here"}}}
+	fx.say(t, "t2", "are you alive?")
+	rep2 := find(t, fx.collectUntil(t, kindReply), kindReply)
+	if rep2.f.Text != "still here" {
+		t.Fatalf("post-interrupt reply = %q, want 'still here' (agent died?)", rep2.f.Text)
+	}
+}
+
 // Tool/delegation trace is published to the observability subject
 // (sys.obs.<id>.trace), OFF the functional report channel. A wildcard subscriber
 // (as `plexus watch` or chat /trace does) sees every tool call; the report
@@ -325,5 +364,24 @@ func TestBusUnconfiguredGatewayAndKey(t *testing.T) {
 	fx.ctrl(t, "c3", cmdStatus, "")
 	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "state=ready") {
 		t.Fatalf("/status after key = %q", r.f.Text)
+	}
+
+	// /reasoning accepts a superset tier (max); /status reflects it; off clears it.
+	fx.ctrl(t, "c4", cmdReasoning, "max")
+	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "max") {
+		t.Fatalf("/reasoning max = %q", r.f.Text)
+	}
+	fx.ctrl(t, "c5", cmdStatus, "")
+	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "reasoning=max") {
+		t.Fatalf("/status reasoning = %q", r.f.Text)
+	}
+	// An unknown tier is rejected with usage.
+	fx.ctrl(t, "c6", cmdReasoning, "bananas")
+	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "usage:") {
+		t.Fatalf("/reasoning bananas = %q, want usage", r.f.Text)
+	}
+	fx.ctrl(t, "c7", cmdReasoning, "off")
+	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "off") {
+		t.Fatalf("/reasoning off = %q", r.f.Text)
 	}
 }

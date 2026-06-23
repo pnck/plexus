@@ -18,12 +18,16 @@ type Provider struct {
 	client    *anthropic.Client
 	model     string
 	MaxTokens int64
+	// thinkingBudget enables extended thinking with this token budget (≥1024);
+	// 0 disables it. Set via WithReasoningEffort's level→budget mapping.
+	thinkingBudget int64
 }
 
 // opts holds optional configuration for the provider constructor.
 type opts struct {
-	baseURL    string
-	middleware []llm.HTTPMiddleware
+	baseURL        string
+	middleware     []llm.HTTPMiddleware
+	thinkingBudget int64
 }
 
 // Option configures the provider via the functional-option pattern.
@@ -40,6 +44,38 @@ func WithBaseURL(url string) Option {
 func WithMiddleware(mw llm.HTTPMiddleware) Option {
 	return func(o *opts) {
 		o.middleware = append(o.middleware, mw)
+	}
+}
+
+// WithReasoningEffort enables Anthropic extended thinking, mapping the neutral
+// effort tier (one of llm.ReasoningEfforts) to a token budget. Empty/unknown
+// disables it. The budget must stay below max_tokens, which GenerateStream
+// enforces per request.
+func WithReasoningEffort(level string) Option {
+	return func(o *opts) {
+		o.thinkingBudget = thinkingBudgetFor(level)
+	}
+}
+
+// thinkingBudgetFor maps an effort tier to an Anthropic thinking budget (tokens,
+// ≥1024). Anthropic's budget is continuous, so it can honor the agent's higher
+// tiers (xhigh/max) with larger budgets instead of clamping. 0 = disabled.
+func thinkingBudgetFor(level string) int64 {
+	switch level {
+	case llm.EffortMinimal:
+		return 1024
+	case llm.EffortLow:
+		return 2048
+	case llm.EffortMedium:
+		return 4096
+	case llm.EffortHigh:
+		return 8192
+	case llm.EffortXHigh:
+		return 16384
+	case llm.EffortMax:
+		return 32768
+	default:
+		return 0
 	}
 }
 
@@ -60,9 +96,10 @@ func NewProvider(apiKey, model string, options ...Option) *Provider {
 
 	client := anthropic.NewClient(reqOpts...)
 	return &Provider{
-		client:    &client,
-		model:     model,
-		MaxTokens: 8192, // TODO: figure out proper value
+		client:         &client,
+		model:          model,
+		MaxTokens:      8192, // TODO: figure out proper value
+		thinkingBudget: o.thinkingBudget,
 	}
 }
 
@@ -121,6 +158,14 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 		Model:     anthropic.Model(p.model),
 		MaxTokens: p.MaxTokens,
 		Messages:  anthropicMsgs,
+	}
+	if p.thinkingBudget > 0 {
+		// Extended thinking: budget must be < max_tokens, so ensure room for the
+		// answer on top of the thinking budget.
+		if params.MaxTokens <= p.thinkingBudget {
+			params.MaxTokens = p.thinkingBudget + p.MaxTokens
+		}
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(p.thinkingBudget)
 	}
 	if len(systemBlocks) > 0 {
 		params.System = systemBlocks

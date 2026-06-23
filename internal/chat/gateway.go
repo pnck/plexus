@@ -30,17 +30,18 @@ const (
 
 // GatewayConfig is the resolved LLM gateway configuration.
 type GatewayConfig struct {
-	Provider string // "openai" | "anthropic"
-	Model    string
-	BaseURL  string
-	APIKey   string
-	Debug    bool // print raw request body + response status (no auth headers)
+	Provider  string // "openai" | "anthropic"
+	Model     string
+	BaseURL   string
+	APIKey    string
+	Debug     bool   // print raw request body + response status (no auth headers)
+	Reasoning string // "" | low | medium | high — reasoning effort / thinking budget
 }
 
 // ResolveGateway fills a GatewayConfig from explicit flags falling back to env.
 // An explicit provider wins; otherwise it is inferred from whichever API key is
 // present (defaulting to openai). The key is read from the provider's env var.
-func ResolveGateway(provider, model, baseURL string, debug bool) GatewayConfig {
+func ResolveGateway(provider, model, baseURL, reasoning string, debug bool) GatewayConfig {
 	provider = firstNonEmpty(provider, os.Getenv("PLEXUS_LLM_PROVIDER"))
 	if provider == "" {
 		switch {
@@ -53,11 +54,12 @@ func ResolveGateway(provider, model, baseURL string, debug bool) GatewayConfig {
 		}
 	}
 	return GatewayConfig{
-		Provider: provider,
-		Model:    firstNonEmpty(model, os.Getenv("PLEXUS_LLM_MODEL"), defaultModel(provider)),
-		BaseURL:  firstNonEmpty(baseURL, os.Getenv("PLEXUS_LLM_BASE_URL")),
-		APIKey:   os.Getenv(envKeyName(provider)),
-		Debug:    debug,
+		Provider:  provider,
+		Model:     firstNonEmpty(model, os.Getenv("PLEXUS_LLM_MODEL"), defaultModel(provider)),
+		BaseURL:   firstNonEmpty(baseURL, os.Getenv("PLEXUS_LLM_BASE_URL")),
+		APIKey:    os.Getenv(envKeyName(provider)),
+		Reasoning: firstNonEmpty(reasoning, os.Getenv("PLEXUS_REASONING")),
+		Debug:     debug,
 	}
 }
 
@@ -77,6 +79,9 @@ func (c GatewayConfig) Build() (llm.Provider, error) {
 		if c.Debug {
 			opts = append(opts, openai.WithMiddleware(debugMiddleware(os.Stdout)))
 		}
+		if c.Reasoning != "" {
+			opts = append(opts, openai.WithReasoningEffort(c.Reasoning))
+		}
 		return openai.NewProvider(c.APIKey, c.Model, opts...), nil
 	case "anthropic":
 		var opts []anthropic.Option
@@ -85,6 +90,9 @@ func (c GatewayConfig) Build() (llm.Provider, error) {
 		}
 		if c.Debug {
 			opts = append(opts, anthropic.WithMiddleware(debugMiddleware(os.Stdout)))
+		}
+		if c.Reasoning != "" {
+			opts = append(opts, anthropic.WithReasoningEffort(c.Reasoning))
 		}
 		return anthropic.NewProvider(c.APIKey, c.Model, opts...), nil
 	default:

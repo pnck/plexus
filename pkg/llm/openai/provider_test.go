@@ -50,3 +50,24 @@ func TestToOpenAIMessagesToolResultPairing(t *testing.T) {
 		t.Fatalf("assistant tool_calls missing call id: %s", ab)
 	}
 }
+
+// WithReasoningEffort flows to the provider field; openaiEffort then maps the
+// neutral tier to OpenAI's range, clamping the agent's higher tiers to high.
+func TestReasoningEffortMapping(t *testing.T) {
+	if p := NewProvider("k", "o3"); p.reasoningEffort != "" {
+		t.Fatalf("default reasoningEffort = %q, want empty", p.reasoningEffort)
+	}
+	if p := NewProvider("k", "o3", WithReasoningEffort("high")); p.reasoningEffort != "high" {
+		t.Fatalf("reasoningEffort = %q, want high", p.reasoningEffort)
+	}
+	cases := map[string]string{
+		"minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
+		"xhigh": "high", "max": "high", // clamp — OpenAI tops at high
+		"": "", "bogus": "",
+	}
+	for in, want := range cases {
+		if got := openaiEffort(in); got != want {
+			t.Errorf("openaiEffort(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

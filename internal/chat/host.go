@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,6 +54,8 @@ type Host struct {
 	reportSubject string
 	corr          atomic.Uint64
 	curCorr       atomic.Value // string: correlation id of the turn the worker is on
+	mu            sync.Mutex
+	turnCancel    context.CancelFunc // cancels the in-flight turn (Ctrl-C resets the loop)
 }
 
 // NewHost assembles a chat agent and binds it to a mesh node under agentID. cfg
@@ -107,6 +110,23 @@ func (h *Host) turnCorr() string {
 	return s
 }
 
+func (h *Host) setTurnCancel(c context.CancelFunc) {
+	h.mu.Lock()
+	h.turnCancel = c
+	h.mu.Unlock()
+}
+
+// cancelTurn aborts the in-flight turn (a /cancel — Ctrl-C). It resets only the
+// current cognitive loop, never the agent or the workflow context.
+func (h *Host) cancelTurn() {
+	h.mu.Lock()
+	c := h.turnCancel
+	h.mu.Unlock()
+	if c != nil {
+		c()
+	}
+}
+
 // onMessage demuxes a bus frame. Approval answers wake the approver; read-only
 // control commands are handled here (concurrent-safe); user turns and the
 // history-mutating reset/system controls are pushed to the worker.
@@ -119,6 +139,8 @@ func (h *Host) onMessage(m protocol.Message) {
 	switch f.Kind {
 	case kindAnswer:
 		h.approver.resolve(m.CorrelationID, strings.EqualFold(strings.TrimSpace(f.Text), approveWord))
+	case kindCancel:
+		h.cancelTurn() // Ctrl-C: reset the in-flight turn only
 	case kindCtrl:
 		if isWorkerCtrl(f.Cmd) {
 			h.inbound.push(m) // serialize with turns on the worker
@@ -152,21 +174,34 @@ func (h *Host) Run(ctx context.Context) error {
 		if f.Kind == kindSay {
 			text = f.Text
 		}
-		reply, err := h.agent.Brain.Handle(ctx, protocol.Message{
+		// Per-turn context: Ctrl-C (a /cancel frame) cancels THIS turn only, never
+		// the workflow ctx — the agent stays alive and returns to the prompt.
+		tctx, tcancel := context.WithCancel(ctx)
+		h.setTurnCancel(tcancel)
+		reply, err := h.agent.Brain.Handle(tctx, protocol.Message{
 			Type:    protocol.TypeP2P,
 			Sender:  "user",
 			TaskID:  taskOr(msg.TaskID),
 			Payload: []byte(text),
 		})
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
+		h.setTurnCancel(nil)
+		// Capture whether the user interrupted THIS turn before we cancel tctx
+		// ourselves (our own tcancel would otherwise make tctx.Err() non-nil).
+		interrupted := tctx.Err() != nil
+		tcancel()
+
+		switch {
+		case err == nil:
+			h.send(ctx, msg.CorrelationID, Frame{Kind: kindReply, Text: reply, Done: true})
+		case ctx.Err() != nil:
+			return <-nodeErr // workflow shutting down
+		case interrupted:
+			// User interrupted this turn — reset the loop, stay alive.
+			h.send(ctx, msg.CorrelationID, Frame{Kind: kindReply, Text: "[interrupted]", Done: true})
+		default:
 			slog.Error("chat: turn failed", "err", err)
 			h.send(ctx, msg.CorrelationID, Frame{Kind: kindError, Text: err.Error()})
-			continue
 		}
-		h.send(ctx, msg.CorrelationID, Frame{Kind: kindReply, Text: reply, Done: true})
 	}
 	return <-nodeErr
 }

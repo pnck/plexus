@@ -21,6 +21,7 @@ type Frame struct {
 const (
 	kindSay      = "say"      // user turn (Text = message)
 	kindAnswer   = "answer"   // approval answer (Text = approve|deny)
+	kindCancel   = "cancel"   // Ctrl-C: reset the in-flight turn (no payload)
 	kindCtrl     = "ctrl"     // control command (host) / control result (back)
 	kindDelta    = "delta"    // streamed assistant text chunk (Text = chunk)
 	kindReply    = "reply"    // turn finished (Done=true; Text = full reply)
@@ -37,17 +38,18 @@ const (
 
 // Control command names (Frame.Cmd) the host understands.
 const (
-	cmdKey      = "key"
-	cmdProvider = "provider"
-	cmdModel    = "model"
-	cmdModels   = "models"
-	cmdSystem   = "system"
-	cmdReset    = "reset"
-	cmdStatus   = "status"
-	cmdDebug    = "debug"
-	cmdTools    = "tools"
-	cmdSteps    = "steps"
-	cmdMemory   = "memory"
+	cmdKey       = "key"
+	cmdProvider  = "provider"
+	cmdModel     = "model"
+	cmdModels    = "models"
+	cmdSystem    = "system"
+	cmdReset     = "reset"
+	cmdStatus    = "status"
+	cmdDebug     = "debug"
+	cmdTools     = "tools"
+	cmdSteps     = "steps"
+	cmdMemory    = "memory"
+	cmdReasoning = "reasoning"
 )
 
 func encodeFrame(f Frame) []byte {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -38,7 +40,7 @@ type inFrame struct {
 
 // slashCommands drives /help and Tab completion.
 var slashCommands = []string{
-	"/key", "/provider", "/model", "/models", "/system", "/debug",
+	"/key", "/provider", "/model", "/models", "/system", "/debug", "/reasoning",
 	"/status", "/tools", "/steps", "/memory", "/reset", "/trace", "/verbose",
 	"/approve", "/deny", "/help", "/?", "/exit", "/quit", "/bye",
 }
@@ -47,7 +49,7 @@ var slashCommands = []string{
 var hostCommands = map[string]string{
 	"/key": cmdKey, "/provider": cmdProvider, "/model": cmdModel, "/models": cmdModels,
 	"/system": cmdSystem, "/debug": cmdDebug, "/status": cmdStatus, "/tools": cmdTools,
-	"/steps": cmdSteps, "/memory": cmdMemory, "/reset": cmdReset,
+	"/steps": cmdSteps, "/memory": cmdMemory, "/reset": cmdReset, "/reasoning": cmdReasoning,
 }
 
 // onReport decodes an agent frame and queues it for the active receive phase.
@@ -112,7 +114,7 @@ func (c *client) say(ctx context.Context, text string) {
 	if !c.send(ctx, corr, Frame{Kind: kindSay, Text: text}, DefaultTaskID) {
 		return
 	}
-	c.receive(ctx)
+	c.receive(ctx, corr)
 }
 
 // trace toggles a subscription to the agent's observability streams
@@ -183,15 +185,25 @@ func (c *client) control(ctx context.Context, cmd, arg string) {
 }
 
 // receive consumes frames for the in-flight turn: print deltas live, answer
-// approvals inline, finish on reply/error.
-func (c *client) receive(ctx context.Context) {
+// approvals inline, finish on reply/error. While waiting it catches Ctrl-C
+// (SIGINT) and asks the agent to reset just this turn — the agent and session
+// stay alive (the workflow context is never cancelled by Ctrl-C).
+func (c *client) receive(ctx context.Context, corr string) {
 	out := c.rl.Stdout()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+
 	printed := false
 	var usage string
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-sigCh:
+			fmt.Fprint(out, "\n\033[2m^C — resetting this turn…\033[0m\n")
+			c.send(ctx, corr, Frame{Kind: kindCancel}, "")
+			// keep reading until the agent's terminal frame ([interrupted]) arrives
 		case in := <-c.frames:
 			switch in.f.Kind {
 			case kindDelta:
@@ -264,6 +276,7 @@ func (c *client) printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  /models           list the provider's models")
 	fmt.Fprintln(out, "  /system <txt>     set the agent's system prompt (resets history)")
 	fmt.Fprintln(out, "  /debug on|off     show raw LLM request body + response status")
+	fmt.Fprintln(out, "  /reasoning <lvl>  reasoning effort: minimal|low|medium|high|xhigh|max|off")
 	fmt.Fprintln(out, "  /status           show gateway config")
 	fmt.Fprintln(out, "  /tools            list the agent's tools")
 	fmt.Fprintln(out, "  /steps            show the agent's plan (checkpoint chain)")

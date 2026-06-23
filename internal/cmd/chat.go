@@ -21,6 +21,7 @@ var (
 	chatDebug     bool
 	chatNatsPort  int
 	chatAllowExec bool
+	chatReasoning string
 )
 
 // chatCmd launches a fully assembled agent (brain + effector + delegation +
@@ -34,14 +35,16 @@ var chatCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// A runtime-reconfigurable gateway: chat starts even without a key — the
 		// user sets one in-session with /key (no startup failure).
-		gw := chat.NewMutableGateway(chat.ResolveGateway(chatProvider, chatModel, chatBaseURL, chatDebug))
+		gw := chat.NewMutableGateway(chat.ResolveGateway(chatProvider, chatModel, chatBaseURL, chatReasoning, chatDebug))
 
 		var roleCard brain.RoleCard
 		if chatSystem != "" {
 			roleCard = brain.RoleCard{SystemPrompt: chatSystem}
 		}
 
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		// Only SIGTERM tears the session down. Ctrl-C (SIGINT) must NOT cancel the
+		// workflow context — it resets the in-flight turn (handled in the REPL).
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 		defer stop()
 
 		return chat.Run(ctx, chat.RunConfig{
@@ -60,6 +63,7 @@ func init() {
 	chatCmd.Flags().StringVar(&chatSystem, "system", "", "Override the default chat role card's system prompt")
 	chatCmd.Flags().StringVar(&chatBaseURL, "base-url", "", "Optional API base URL (env PLEXUS_LLM_BASE_URL)")
 	chatCmd.Flags().BoolVar(&chatDebug, "debug-llm", false, "Print raw LLM request body + response status")
+	chatCmd.Flags().StringVar(&chatReasoning, "reasoning", "", "Reasoning effort: minimal|low|medium|high|xhigh|max (mapped/clamped per provider; env PLEXUS_REASONING)")
 	chatCmd.Flags().IntVar(&chatNatsPort, "nats-port", 4222, "Embedded NATS port")
 	chatCmd.Flags().BoolVar(&chatAllowExec, "allow-exec", false, "Enable the run_command effector (arbitrary shell; each call is approval-gated)")
 }

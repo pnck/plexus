@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"plexus/pkg/brain"
+	"plexus/pkg/llm"
 )
 
 // Control commands (the /-commands' host side). Read-only commands run on the
@@ -58,6 +59,16 @@ func (h *Host) runCtrl(ctx context.Context, cmd, arg string) string {
 			return h.reconfigure("debug off", func(c *GatewayConfig) { c.Debug = false })
 		default:
 			return "usage: /debug on|off"
+		}
+	case cmdReasoning:
+		level := strings.ToLower(arg)
+		switch {
+		case level == "off" || level == "none" || level == "":
+			return h.reconfigure("reasoning off", func(c *GatewayConfig) { c.Reasoning = "" })
+		case llm.ValidEffort(level):
+			return h.reconfigure("reasoning effort = "+level, func(c *GatewayConfig) { c.Reasoning = level })
+		default:
+			return "usage: /reasoning " + strings.Join(llm.ReasoningEfforts, "|") + "|off"
 		}
 	case cmdModels:
 		return h.listModels(ctx)
@@ -116,6 +127,9 @@ func (h *Host) status() string {
 	fmt.Fprintf(&b, "provider=%s model=%s key=%s state=%s", cfg.Provider, cfg.Model, key, state)
 	if cfg.BaseURL != "" {
 		fmt.Fprintf(&b, " base-url=%s", normalizeBaseURL(cfg.Provider, cfg.BaseURL))
+	}
+	if cfg.Reasoning != "" {
+		fmt.Fprintf(&b, " reasoning=%s", cfg.Reasoning)
 	}
 	if cfg.Debug {
 		fmt.Fprint(&b, " debug=on")
