@@ -25,8 +25,16 @@ type Config struct {
 	// RoleCard overrides the chat default; zero value uses DefaultRoleCard().
 	RoleCard brain.RoleCard
 	// Approver gates approval-required effectors; nil denies all (DenyApprover).
-	// The interactive /approve /deny approver is wired in a later E2.6 node.
+	// The bus host supplies the interactive /approve /deny approver.
 	Approver brain.Approver
+	// Inbound is the brain's structured-message intake. Nil means the in-process
+	// Handle() path only; the bus host (host.go) supplies a channel-backed Inbound
+	// so the brain can be driven by NATS via Brain.Step.
+	Inbound brain.Inbound
+	// IncludeRunCommand registers the run_command effector (ExecArbitrary,
+	// approval-gated). Off by default — the approval-free primitives cover
+	// ordinary work; arbitrary shell is opt-in.
+	IncludeRunCommand bool
 }
 
 // Agent is a fully assembled chat agent: an LLM gateway, the built-in effector
@@ -68,8 +76,9 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 
 	reg := effector.NewRegistry(nil)
 	effector.RegisterBuiltins(reg, effector.BuiltinOptions{
-		WorkingMemory: workingMemory,
-		Checkpoints:   checkpoints,
+		WorkingMemory:     workingMemory,
+		Checkpoints:       checkpoints,
+		IncludeRunCommand: cfg.IncludeRunCommand,
 	})
 
 	roleCard := cfg.RoleCard
@@ -87,8 +96,7 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		RoleCard: roleCard,
 		Approver: approver,
 		Emitter:  rejectEmitter{}, // chat rejects task_* (open-ended pseudo-task)
-		// Inbound is left nil: the in-process path drives the brain via Handle;
-		// the channel-backed Inbound is wired by the bus host (E2.6.2).
+		Inbound:  cfg.Inbound,     // nil for the in-process Handle path; set by the bus host
 	})
 
 	return &Agent{Brain: b, db: db}, nil

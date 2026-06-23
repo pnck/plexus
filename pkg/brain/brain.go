@@ -199,7 +199,11 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 				Role:       llm.RoleAssistant,
 				Content:    text,
 			})
-			// ⑦ CHECKPOINT POINT: history would be persisted to SQLite here (E2.5).
+			// ⑦ §5.7.9: there is no history-as-checkpoint. The step plan IS the
+			// checkpoint chain and the agent already persists it via the step_*
+			// tools (CheckpointStore); history frames are the step's droppable
+			// working transcript. Cross-process resume rebuilds from the step chain
+			// + working memory (persistent yield: E1.4), never by replaying history.
 			return text, nil
 		}
 		// Record the assistant's tool-call turn so the wire history is well-formed.
@@ -224,8 +228,9 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 				ToolCallID: call.ID,
 			})
 		}
-		// ⑦ CHECKPOINT POINT: history would be persisted to SQLite here (E2.5),
-		// then the loop re-composes and continues.
+		// ⑦ §5.7.9: nothing to checkpoint here — the step plan persists via the
+		// step_* tools (CheckpointStore); history is the droppable working
+		// transcript. The loop re-composes and continues.
 	}
 	return "", fmt.Errorf("brain hit max turns (%d) without converging", b.maxTurns)
 }

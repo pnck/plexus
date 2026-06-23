@@ -35,7 +35,7 @@ func main() {
 
 	slog.Info("Starting test-agent", "id", *agentID)
 	var a *mesh.Node
-	a = mesh.NewNode(*agentID, 
+	a = mesh.NewNode(*agentID,
 		mesh.WithNatsURL(*natsURL),
 		mesh.WithOnMessage(func(msg protocol.Message) {
 			reportMsg := protocol.Message{
@@ -118,7 +118,7 @@ func main() {
 						if target == "" {
 							continue
 						}
-						
+
 						reportMsg := protocol.Message{
 							Sender:  *agentID,
 							Target:  "server",
@@ -126,7 +126,7 @@ func main() {
 							Payload: []byte(fmt.Sprintf("SOURCE:P2P[%s]|MSG:PING_FROM:%s", target, *agentID)),
 						}
 						_ = a.SendRaw(ctx, "sys.report", reportMsg)
-						
+
 						_ = a.SendMessage(ctx, target, []byte("PING_FROM:"+*agentID))
 					}
 					time.Sleep(1 * time.Second)
