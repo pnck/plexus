@@ -211,14 +211,21 @@ func TestBuiltinRunCommand(t *testing.T) {
 	}
 }
 
-// fakeMCPClient implements mcpCaller for adapter tests without a live server.
+// fakeMCPClient implements mcpCaller + mcpToolSource for adapter/registration
+// tests without a live server.
 type fakeMCPClient struct {
-	res mcp.ToolResult
-	err error
+	res     mcp.ToolResult
+	err     error
+	tools   []mcp.ToolInfo
+	listErr error
 }
 
 func (f fakeMCPClient) CallTool(context.Context, string, json.RawMessage) (mcp.ToolResult, error) {
 	return f.res, f.err
+}
+
+func (f fakeMCPClient) ListTools(context.Context) ([]mcp.ToolInfo, error) {
+	return f.tools, f.listErr
 }
 
 func TestMCPAdapterRiskTagging(t *testing.T) {
@@ -255,5 +262,94 @@ func TestMCPAdapterRiskTagging(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("expected Result.IsError for tool-level MCP error")
+	}
+}
+
+// AdaptTool wires an mcp.ToolInfo + client + RiskMap into a working Effector:
+// name/description/schema pass through, the risk comes from the map (unknown ->
+// ExecArbitrary), and Invoke forwards to the client.
+func TestAdaptTool(t *testing.T) {
+	info := mcp.ToolInfo{Name: "read_doc", Description: "read a doc", InputSchema: json.RawMessage(`{"type":"object"}`)}
+	client := fakeMCPClient{res: mcp.ToolResult{Content: "DOC"}}
+
+	eff := AdaptTool(info, client, RiskMap{"read_doc": Read})
+	if eff.Name() != "read_doc" {
+		t.Fatalf("name=%q", eff.Name())
+	}
+	if eff.Description() != "read a doc" {
+		t.Fatalf("description=%q", eff.Description())
+	}
+	if string(eff.Schema()) != `{"type":"object"}` {
+		t.Fatalf("schema=%q", eff.Schema())
+	}
+	if eff.Risk() != Read {
+		t.Fatalf("risk=%v want Read", eff.Risk())
+	}
+	res, err := eff.Invoke(context.Background(), nil)
+	if err != nil || res.Content != "DOC" {
+		t.Fatalf("invoke res=%+v err=%v", res, err)
+	}
+
+	// A tool absent from the RiskMap defaults to ExecArbitrary (highest tier).
+	if got := AdaptTool(mcp.ToolInfo{Name: "mystery"}, client, RiskMap{}).Risk(); got != ExecArbitrary {
+		t.Fatalf("unknown-tool risk=%v want ExecArbitrary", got)
+	}
+
+	// A transport/protocol error from the client surfaces as a Go error (distinct
+	// from a tool-level Result.IsError).
+	transportErr := AdaptTool(info, fakeMCPClient{err: errors.New("conn reset")}, RiskMap{})
+	if _, err := transportErr.Invoke(context.Background(), nil); err == nil {
+		t.Fatal("expected transport error to surface as a Go error")
+	}
+}
+
+// RegisterMCPClient lists the server's tools and registers each as a risk-tagged
+// Effector in the registry: tools are retrievable by name, risk tags drive the
+// approval policy, Invoke flows through, and a ListTools failure propagates.
+func TestRegisterMCPClient(t *testing.T) {
+	client := fakeMCPClient{
+		tools: []mcp.ToolInfo{
+			{Name: "read_doc", Description: "r", InputSchema: json.RawMessage(`{"type":"object"}`)},
+			{Name: "danger", Description: "d", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		},
+		res: mcp.ToolResult{Content: "ok"},
+	}
+	risks := RiskMap{"read_doc": Read} // "danger" is unknown -> ExecArbitrary
+
+	reg := NewRegistry(nil)
+	out, err := RegisterMCPClient(context.Background(), reg, client, risks)
+	if err != nil {
+		t.Fatalf("RegisterMCPClient: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("registered %d effectors, want 2", len(out))
+	}
+
+	// Both tools are registered and carry the right risk tag.
+	rd, ok := reg.Get("read_doc")
+	if !ok || rd.Risk() != Read {
+		t.Fatalf("read_doc: ok=%v risk=%v", ok, rd.Risk())
+	}
+	dg, ok := reg.Get("danger")
+	if !ok || dg.Risk() != ExecArbitrary {
+		t.Fatalf("danger: ok=%v risk=%v want ExecArbitrary", ok, dg.Risk())
+	}
+
+	// Risk tags drive approval: ExecArbitrary gates, Read does not.
+	if !reg.RequiresApproval("danger") {
+		t.Fatal("danger (ExecArbitrary) should require approval")
+	}
+	if reg.RequiresApproval("read_doc") {
+		t.Fatal("read_doc (Read) should not require approval")
+	}
+
+	// Invoke flows through the registered adapter to the client.
+	if res, err := rd.Invoke(context.Background(), nil); err != nil || res.Content != "ok" {
+		t.Fatalf("invoke res=%+v err=%v", res, err)
+	}
+
+	// A ListTools failure propagates as a Go error (nothing registered).
+	if _, err := RegisterMCPClient(context.Background(), NewRegistry(nil), fakeMCPClient{listErr: errors.New("boom")}, risks); err == nil {
+		t.Fatal("expected ListTools error to propagate")
 	}
 }

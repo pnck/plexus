@@ -13,6 +13,15 @@ type mcpCaller interface {
 	CallTool(ctx context.Context, name string, args json.RawMessage) (mcp.ToolResult, error)
 }
 
+// mcpToolSource is what RegisterMCPClient needs: enumerating tools plus the
+// per-tool call surface. Narrowing to an interface (mirroring mcpCaller) keeps
+// the registration path testable with a fake — no live MCP server. The concrete
+// *mcp.Client satisfies it.
+type mcpToolSource interface {
+	ListTools(ctx context.Context) ([]mcp.ToolInfo, error)
+	mcpCaller
+}
+
 // mcpEffector adapts a single MCP tool (an mcp.ToolInfo plus the owning client)
 // into an Effector. MCP tools do not carry a risk tag, so the tag is assigned at
 // registration time.
@@ -53,8 +62,9 @@ func (m RiskMap) RiskFor(name string) RiskTag {
 }
 
 // AdaptTool wraps a single MCP tool as an Effector, assigning its RiskTag from
-// the supplied RiskMap (unknown tools default to ExecArbitrary).
-func AdaptTool(info mcp.ToolInfo, client *mcp.Client, risks RiskMap) Effector {
+// the supplied RiskMap (unknown tools default to ExecArbitrary). client is the
+// MCP call surface (a *mcp.Client in production).
+func AdaptTool(info mcp.ToolInfo, client mcpCaller, risks RiskMap) Effector {
 	return &mcpEffector{
 		info:   info,
 		risk:   risks.RiskFor(info.Name),
@@ -63,9 +73,10 @@ func AdaptTool(info mcp.ToolInfo, client *mcp.Client, risks RiskMap) Effector {
 }
 
 // RegisterMCPClient lists the tools advertised by client and registers each as
-// an Effector in r, assigning risk tags from risks (unknown -> ExecArbitrary). It returns
-// the effectors registered.
-func RegisterMCPClient(ctx context.Context, r *Registry, client *mcp.Client, risks RiskMap) ([]Effector, error) {
+// an Effector in r, assigning risk tags from risks (unknown -> ExecArbitrary). It
+// returns the effectors registered. client is an MCP tool source (a *mcp.Client
+// in production).
+func RegisterMCPClient(ctx context.Context, r *Registry, client mcpToolSource, risks RiskMap) ([]Effector, error) {
 	tools, err := client.ListTools(ctx)
 	if err != nil {
 		return nil, err
