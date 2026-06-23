@@ -31,11 +31,13 @@ type Config struct {
 	// approval-gated). Off by default — the approval-free primitives cover
 	// ordinary work; arbitrary shell is opt-in.
 	IncludeRunCommand bool
-	// OnDelta / OnUsage / OnTool are the brain's live sinks (host wires them to the
-	// bus). Optional.
-	OnDelta func(string)
-	OnUsage func(llm.Usage)
-	OnTool  func(name, args, result string)
+	// OnDelta / OnThinking / OnUsage / OnToolStart / OnTool are the brain's live
+	// sinks (host wires them to the bus). Optional.
+	OnDelta     func(string)
+	OnThinking  func(string)
+	OnUsage     func(llm.Usage)
+	OnToolStart func(name, args string)
+	OnTool      func(name, args, result string)
 }
 
 // Agent is a fully assembled chat agent: an LLM gateway, the built-in effector
@@ -95,14 +97,16 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 	}
 
 	b := brain.New(brain.Options{
-		Gateway:  cfg.Gateway,
-		Registry: reg,
-		RoleCard: roleCard,
-		Approver: approver,
-		Emitter:  rejectEmitter{}, // chat rejects task_* (open-ended pseudo-task)
-		OnDelta:  cfg.OnDelta,
-		OnUsage:  cfg.OnUsage,
-		OnTool:   cfg.OnTool,
+		Gateway:     cfg.Gateway,
+		Registry:    reg,
+		RoleCard:    roleCard,
+		Approver:    approver,
+		Emitter:     rejectEmitter{}, // chat rejects task_* (open-ended pseudo-task)
+		OnDelta:     cfg.OnDelta,
+		OnThinking:  cfg.OnThinking,
+		OnUsage:     cfg.OnUsage,
+		OnToolStart: cfg.OnToolStart,
+		OnTool:      cfg.OnTool,
 	})
 
 	return &Agent{

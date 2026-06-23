@@ -205,6 +205,9 @@ type openaiStream struct {
 	finishReason string
 	usage        *llm.Usage
 	flushed      bool
+
+	// think splits inline <think>…</think> in the content stream.
+	think thinkSplitter
 }
 
 func (s *openaiStream) Next() bool {
@@ -254,9 +257,18 @@ func (s *openaiStream) Next() bool {
 				s.finishReason = string(choice.FinishReason)
 			}
 
-			// Text deltas are emitted immediately as they arrive.
+			// Assemble this chunk's user-visible events: reasoning_content (a
+			// non-standard thinking field) first, then content split on <think>.
+			var evs []llm.StreamEvent
+			if rc := reasoningExtra(choice.Delta.JSON.ExtraFields); rc != "" {
+				evs = append(evs, llm.StreamEvent{DeltaThinking: rc})
+			}
 			if choice.Delta.Content != "" {
-				s.current = llm.StreamEvent{DeltaText: choice.Delta.Content}
+				evs = append(evs, s.think.feed(choice.Delta.Content)...)
+			}
+			if len(evs) > 0 {
+				s.current = evs[0]
+				s.pending = append(s.pending, evs[1:]...)
 				return true
 			}
 		}
@@ -268,6 +280,7 @@ func (s *openaiStream) Next() bool {
 	// Stream ended: assemble tool calls and the terminal event exactly once.
 	if !s.flushed {
 		s.flushed = true
+		s.pending = append(s.pending, s.think.flush()...) // any carried partial tag
 		s.assembleFinalEvents()
 		if len(s.pending) > 0 {
 			s.current = s.pending[0]

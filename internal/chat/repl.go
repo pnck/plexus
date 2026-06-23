@@ -15,6 +15,20 @@ import (
 	"plexus/server"
 )
 
+// ANSI colors for the side-channel streams, so the eye can separate them from
+// the answer (which stays the terminal's default color) and from each other.
+// Each kind owns one hue; reset closes a run.
+const (
+	colReset    = "\033[0m"
+	colThink    = "\033[90m"   // thinking — gray, subdued (it is verbose by nature)
+	colTool     = "\033[36m"   // tool call — cyan
+	colDelegate = "\033[35m"   // delegation — magenta (spawns sub-cognition; stands out)
+	colTrace    = "\033[2;37m" // verbose /trace obs — dim
+	colApproval = "\033[33m"   // approval prompt — yellow
+	colError    = "\033[31m"   // turn error — red
+	colUsage    = "\033[2m"    // token usage — dim
+)
+
 // client is the rich REPL on the control-plane side. It talks to the hosted
 // agent only over the bus (frames in/out), never touching the brain directly.
 // The flow is synchronous per turn: submit a message, stream the reply live,
@@ -123,7 +137,14 @@ func (c *client) say(ctx context.Context, text string) {
 func (c *client) trace(out io.Writer, arg string) {
 	on := c.obsSub != nil
 	switch arg {
-	case "", "on":
+	case "": // no-arg = get
+		if on {
+			fmt.Fprintln(out, "trace = on")
+		} else {
+			fmt.Fprintln(out, "trace = off")
+		}
+		return
+	case "on":
 		if on {
 			fmt.Fprintln(out, "(trace already on)")
 			return
@@ -195,7 +216,25 @@ func (c *client) receive(ctx context.Context, corr string) {
 	defer signal.Stop(sigCh)
 
 	printed := false
+	thinking := false // currently rendering a (dim) thinking run
+	midLine := false  // un-terminated answer text is on the current line
 	var usage string
+	// endThinking closes the colored thinking run before answer/terminal output.
+	endThinking := func() {
+		if thinking {
+			fmt.Fprint(out, colReset+"\n")
+			thinking = false
+		}
+	}
+	// freshLine ensures the next output starts at column 0 (so a dim activity
+	// line never glues onto streamed answer text).
+	freshLine := func() {
+		endThinking()
+		if midLine {
+			fmt.Fprintln(out)
+			midLine = false
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -206,26 +245,47 @@ func (c *client) receive(ctx context.Context, corr string) {
 			// keep reading until the agent's terminal frame ([interrupted]) arrives
 		case in := <-c.frames:
 			switch in.f.Kind {
+			case kindThinking:
+				if !thinking {
+					fmt.Fprint(out, colThink+"[think] ")
+					thinking = true
+				}
+				fmt.Fprint(out, in.f.Text)
 			case kindDelta:
+				endThinking()
 				fmt.Fprint(out, in.f.Text)
 				printed = true
+				midLine = !strings.HasSuffix(in.f.Text, "\n")
+			case kindActivity:
+				// always-on activity marker (tool/delegation starting). Cmd carries
+				// the subtype so the color is chosen by semantics, not text matching.
+				freshLine()
+				col := colTool
+				if in.f.Cmd == activityDelegate {
+					col = colDelegate
+				}
+				fmt.Fprintf(out, "%s%s%s\n", col, in.f.Text, colReset)
 			case kindUsage:
 				usage = in.f.Text
 			case kindTrace:
-				// dim observability line from the obs stream (Text is preformatted).
-				fmt.Fprintf(out, "\033[2m· %s\033[0m\n", in.f.Text)
+				// verbose observability block from the obs stream (Text is the
+				// preformatted multi-line trace body).
+				freshLine()
+				printTrace(out, in.f.Text)
 			case kindApproval:
 				c.approval(ctx, in.corr, in.f.Text)
 			case kindError:
-				fmt.Fprintf(out, "\n[error: %s]\n", in.f.Text)
+				endThinking()
+				fmt.Fprintf(out, "%s\n[error: %s]%s\n", colError, in.f.Text, colReset)
 				return
 			case kindReply:
+				endThinking()
 				if !printed && in.f.Text != "" {
 					fmt.Fprint(out, in.f.Text)
 				}
 				fmt.Fprintln(out)
 				if usage != "" {
-					fmt.Fprintf(out, "\033[2m[%s]\033[0m\n", usage)
+					fmt.Fprintf(out, "%s[%s]%s\n", colUsage, usage, colReset)
 				}
 				return
 			}
@@ -236,7 +296,7 @@ func (c *client) receive(ctx context.Context, corr string) {
 // approval prompts for /approve–/deny and sends the answer back, paired by corr.
 func (c *client) approval(ctx context.Context, corr, desc string) {
 	out := c.rl.Stdout()
-	fmt.Fprintf(out, "\n\033[33m⚠ approval required:\033[0m %s\n", desc)
+	fmt.Fprintf(out, "\n%s[approval required]%s %s\n", colApproval, colReset, desc)
 	for {
 		line, err := c.rl.Readline()
 		if err != nil {
@@ -268,6 +328,19 @@ func (c *client) send(ctx context.Context, corr string, f Frame, task string) bo
 	return true
 }
 
+// printTrace renders a multi-line trace body dim, tagging the first line with
+// [trace] and indenting the continuation lines (args:/result:) to align under
+// it. Each line is colored independently so the dim run never bleeds past a
+// newline into the prompt.
+func printTrace(out io.Writer, body string) {
+	const indent = "        " // len("[trace] ")
+	lines := strings.Split(body, "\n")
+	fmt.Fprintf(out, "%s[trace] %s%s\n", colTrace, lines[0], colReset)
+	for _, ln := range lines[1:] {
+		fmt.Fprintf(out, "%s%s%s%s\n", colTrace, indent, ln, colReset)
+	}
+}
+
 func (c *client) printHelp(out io.Writer) {
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintln(out, "  /key <v>          set the LLM API key (start without one is fine)")
@@ -281,7 +354,7 @@ func (c *client) printHelp(out io.Writer) {
 	fmt.Fprintln(out, "  /tools            list the agent's tools")
 	fmt.Fprintln(out, "  /steps            show the agent's plan (checkpoint chain)")
 	fmt.Fprintln(out, "  /memory           show the agent's working memory")
-	fmt.Fprintln(out, "  /trace on|off     show each tool/delegation call (alias /verbose)")
+	fmt.Fprintln(out, "  /trace on|off     verbose tool/delegation results + raw obs (alias /verbose)")
 	fmt.Fprintln(out, "  /reset            clear the conversation")
 	fmt.Fprintln(out, "  /approve, /deny   answer a pending approval")
 	fmt.Fprintln(out, "  /help, /exit      this help / quit (also Ctrl-D)")

@@ -50,13 +50,14 @@ type Result struct {
 	OpenQuestions string   `json:"open_questions"` // open questions / "needed X but not permitted"
 }
 
-// delegateToolName is the built-in tool the brain surfaces to its LLM (alongside
+// DelegateToolName is the built-in tool the brain surfaces to its LLM (alongside
 // the registry's effectors). delegate is the wire form of THIS delegation
 // contract — not an effector (it spawns cognition, has no risk tag, and is
 // intercepted, never Invoke'd) — so its schema lives here, with Briefing, rather
 // than in the loop or the effector layer. The brain intercepts a call to it and
-// spawns a fresh delegation.
-const delegateToolName = "delegate"
+// spawns a fresh delegation. Exported so the chat host can recognize delegation
+// in tool-activity callbacks and render it distinctly from an effector call.
+const DelegateToolName = "delegate"
 
 // delegateSchema is the JSON schema for the delegate tool's arguments. It is
 // reflected from delegateArgs (jsonschema.For) — the struct, with its tags, is

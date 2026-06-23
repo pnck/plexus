@@ -26,10 +26,13 @@ func (h *Host) runWorkerCtrl(cmd, arg string) string {
 		h.agent.Brain.Reset()
 		return "history cleared"
 	case cmdSystem:
-		h.agent.Brain.SetRoleCard(brain.RoleCard{SystemPrompt: arg})
-		if arg == "" {
-			return "system prompt cleared; history reset"
+		if arg == "" { // no-arg = get (read-only; does not reset history)
+			if rc := h.agent.Brain.RoleCard(); rc.SystemPrompt != "" {
+				return rc.SystemPrompt
+			}
+			return "(no system prompt set)"
 		}
+		h.agent.Brain.SetRoleCard(brain.RoleCard{SystemPrompt: arg})
 		return "system prompt set; history reset"
 	default:
 		return fmt.Sprintf("unknown control command %q", cmd)
@@ -40,19 +43,37 @@ func (h *Host) runWorkerCtrl(cmd, arg string) string {
 func (h *Host) runCtrl(ctx context.Context, cmd, arg string) string {
 	switch cmd {
 	case cmdKey:
+		if arg == "" { // no-arg = get (never clear the key by accident)
+			return h.gwGet(func(c GatewayConfig) string {
+				if c.APIKey != "" {
+					return "api key is set"
+				}
+				return "no api key set — set one with /key <value>"
+			})
+		}
 		return h.reconfigure("api key set", func(c *GatewayConfig) { c.APIKey = arg })
 	case cmdProvider:
+		if arg == "" { // no-arg = get
+			return h.gwGet(func(c GatewayConfig) string { return "provider = " + c.Provider })
+		}
 		if arg != "openai" && arg != "anthropic" {
 			return "usage: /provider openai|anthropic"
 		}
 		return h.reconfigure("provider set to "+arg, func(c *GatewayConfig) { c.Provider = arg })
 	case cmdModel:
-		if arg == "" {
-			return "usage: /model <id>"
+		if arg == "" { // no-arg = get
+			return h.gwGet(func(c GatewayConfig) string { return "model = " + c.Model })
 		}
 		return h.reconfigure("model set to "+arg, func(c *GatewayConfig) { c.Model = arg })
 	case cmdDebug:
 		switch arg {
+		case "": // no-arg = get
+			return h.gwGet(func(c GatewayConfig) string {
+				if c.Debug {
+					return "debug = on"
+				}
+				return "debug = off"
+			})
 		case "on":
 			return h.reconfigure("debug on", func(c *GatewayConfig) { c.Debug = true })
 		case "off":
@@ -63,7 +84,14 @@ func (h *Host) runCtrl(ctx context.Context, cmd, arg string) string {
 	case cmdReasoning:
 		level := strings.ToLower(arg)
 		switch {
-		case level == "off" || level == "none" || level == "":
+		case level == "": // no-arg = get (does NOT turn reasoning off)
+			return h.gwGet(func(c GatewayConfig) string {
+				if c.Reasoning == "" {
+					return "reasoning = off"
+				}
+				return "reasoning = " + c.Reasoning
+			})
+		case level == "off" || level == "none":
 			return h.reconfigure("reasoning off", func(c *GatewayConfig) { c.Reasoning = "" })
 		case llm.ValidEffort(level):
 			return h.reconfigure("reasoning effort = "+level, func(c *GatewayConfig) { c.Reasoning = level })
@@ -83,6 +111,16 @@ func (h *Host) runCtrl(ctx context.Context, cmd, arg string) string {
 	default:
 		return fmt.Sprintf("unknown control command %q", cmd)
 	}
+}
+
+// gwGet reads the current gateway config for a no-arg get command (read-only),
+// or reports that the gateway is fixed.
+func (h *Host) gwGet(show func(GatewayConfig) string) string {
+	if h.gw == nil {
+		return "gateway is not runtime-configurable"
+	}
+	cfg, _ := h.gw.status()
+	return show(cfg)
 }
 
 // reconfigure mutates the gateway config and reports success or the build error.

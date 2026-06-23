@@ -231,6 +231,11 @@ func (s *anthropicStream) Next() bool {
 					s.current = llm.StreamEvent{DeltaText: delta.Text}
 					return true
 				}
+			case anthropic.ThinkingDelta:
+				if delta.Thinking != "" {
+					s.current = llm.StreamEvent{DeltaThinking: delta.Thinking}
+					return true
+				}
 			case anthropic.InputJSONDelta:
 				if pb, ok := s.blocks[ev.Index]; ok {
 					pb.input.WriteString(delta.PartialJSON)

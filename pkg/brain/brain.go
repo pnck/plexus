@@ -63,8 +63,10 @@ type Brain struct {
 	inbound            Inbound
 	approver           Approver
 	onDelta            func(string)                    // optional: live streamed-text sink (nil = off)
+	onThinking         func(string)                    // optional: live reasoning/thinking sink (nil = off)
 	onUsage            func(llm.Usage)                 // optional: per-turn token usage sink (nil = off)
-	onTool             func(name, args, result string) // optional: per tool/delegation dispatch (observability)
+	onToolStart        func(name, args string)         // optional: BEFORE each tool/delegation dispatch (live activity)
+	onTool             func(name, args, result string) // optional: AFTER each tool/delegation dispatch (observability)
 	maxTurns           int                             // cognitive-loop bound (runaway-model guard)
 	delegationMaxTurns int                             // bound passed to each spawned delegation's loop
 }
@@ -97,9 +99,17 @@ type Options struct {
 	// OnDelta, if set, receives streamed assistant-text chunks as they arrive
 	// during the cognitive loop (live display). Called on the loop's goroutine.
 	OnDelta func(string)
+	// OnThinking, if set, receives streamed reasoning/thinking chunks for live
+	// display. Thinking is shown but never enters history (it is a draft).
+	OnThinking func(string)
 	// OnUsage, if set, receives the accumulated token usage once per turn, just
 	// before the final reply is returned.
 	OnUsage func(llm.Usage)
+	// OnToolStart, if set, is called immediately BEFORE each tool/delegation
+	// dispatch with the tool name and its JSON arguments. It exists so a UI can
+	// show activity the moment work begins — crucial for long-running delegation,
+	// whose result (via OnTool) lands only after the sub-task completes.
+	OnToolStart func(name, args string)
 	// OnTool, if set, is called after each tool/delegation dispatch with the tool
 	// name, its JSON arguments, and the result fed back to the model — a pure
 	// observability tap (the result still flows into history regardless).
@@ -133,7 +143,9 @@ func New(opt Options) *Brain {
 		inbound:            opt.Inbound,
 		approver:           app,
 		onDelta:            opt.OnDelta,
+		onThinking:         opt.OnThinking,
 		onUsage:            opt.OnUsage,
+		onToolStart:        opt.OnToolStart,
 		onTool:             opt.OnTool,
 		maxTurns:           maxTurns,
 		delegationMaxTurns: delegationMaxTurns,
@@ -175,6 +187,10 @@ func (b *Brain) SetRoleCard(rc RoleCard) {
 	b.roleCard = rc
 	b.seed()
 }
+
+// RoleCard returns the current role card. Read-only; used by the no-arg /system
+// command to show the active system prompt without mutating history.
+func (b *Brain) RoleCard() RoleCard { return b.roleCard }
 
 // History returns a snapshot of the brain's current history frames. Exposed so a
 // checkpoint layer (E2.5) and tests can inspect what would be persisted; the
@@ -221,7 +237,7 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 		// ② compose() renders frames into a layered message list.
 		msgs := compose(b.history)
 		// ③ gateway stream + ④ parse StreamEvents. (No mode gate — plexus has none.)
-		text, calls, usage, err := stream(ctx, b.gateway, msgs, tools, b.onDelta)
+		text, calls, usage, err := stream(ctx, b.gateway, msgs, tools, b.onDelta, b.onThinking)
 		if err != nil {
 			return "", err
 		}
@@ -260,6 +276,9 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 		// memory and the step_* checkpoint primitives — address the right task.
 		dctx := effector.WithTaskScope(ctx, b.currentTask)
 		for _, call := range calls {
+			if b.onToolStart != nil {
+				b.onToolStart(call.Name, call.Arguments)
+			}
 			content := b.dispatch(dctx, call)
 			if b.onTool != nil {
 				b.onTool(call.Name, call.Arguments, content)
@@ -288,7 +307,7 @@ func (b *Brain) toolSurface() []llm.ToolDefinition {
 		defs = toolDefs(b.reg.List())
 	}
 	defs = append(defs, llm.ToolDefinition{
-		Name:        delegateToolName,
+		Name:        DelegateToolName,
 		Description: "Delegate a self-contained, flood-producing sub-task to a fresh isolated delegation. It runs with a curated capability envelope and returns ONLY a distilled result. Use when the work is self-containable via a briefing; inline trivial work yourself.",
 		Parameters:  delegateSchema(),
 	})
@@ -304,7 +323,7 @@ func (b *Brain) toolSurface() []llm.ToolDefinition {
 // effector call gated by the approval hook.
 func (b *Brain) dispatch(ctx context.Context, call llm.ToolCall) string {
 	switch call.Name {
-	case delegateToolName:
+	case DelegateToolName:
 		return b.delegate(ctx, call)
 	case taskReportToolName, taskRevertToolName:
 		return b.emitTask(ctx, call)

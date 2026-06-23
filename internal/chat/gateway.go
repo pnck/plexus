@@ -226,18 +226,18 @@ func debugMiddleware(out io.Writer) llm.HTTPMiddleware {
 			if err == nil {
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
-				fmt.Fprintf(out, "\033[2m→ %s %s\n%s\033[0m\n", req.Method, req.URL, prettyJSON(body))
+				fmt.Fprintf(out, "\033[2m-> %s %s\n%s\033[0m\n", req.Method, req.URL, prettyJSON(body))
 			}
 		} else {
-			fmt.Fprintf(out, "\033[2m→ %s %s\033[0m\n", req.Method, req.URL)
+			fmt.Fprintf(out, "\033[2m-> %s %s\033[0m\n", req.Method, req.URL)
 		}
 		resp, err := next(req)
 		if err != nil {
-			fmt.Fprintf(out, "\033[2m← transport error: %v\033[0m\n", err)
+			fmt.Fprintf(out, "\033[2m<- transport error: %v\033[0m\n", err)
 			return resp, err
 		}
 		if resp != nil {
-			fmt.Fprintf(out, "\033[2m← %s\033[0m\n", resp.Status)
+			fmt.Fprintf(out, "\033[2m<- %s\033[0m\n", resp.Status)
 		}
 		return resp, err
 	}

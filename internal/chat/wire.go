@@ -24,16 +24,25 @@ const (
 	kindCancel   = "cancel"   // Ctrl-C: reset the in-flight turn (no payload)
 	kindCtrl     = "ctrl"     // control command (host) / control result (back)
 	kindDelta    = "delta"    // streamed assistant text chunk (Text = chunk)
+	kindThinking = "thinking" // streamed reasoning chunk (Text = chunk; always shown)
 	kindReply    = "reply"    // turn finished (Done=true; Text = full reply)
 	kindUsage    = "usage"    // token usage line (Text = formatted)
+	kindActivity = "activity" // tool/delegation starting (Text = activity line; always shown)
 	kindApproval = "approval" // approval request (Text = description)
 	kindError    = "error"    // turn-level error (Text = message)
-	kindTrace    = "trace"    // tool/delegation dispatch trace (Cmd=name, Arg=args, Text=result)
+	kindTrace    = "trace"    // tool/delegation dispatch trace (verbose, /trace only)
 )
 
 const (
 	approveWord = "approve"
 	denyWord    = "deny"
+)
+
+// Activity subtypes carried in a kindActivity frame's Cmd, so the client colors
+// by semantics rather than by matching the rendered text.
+const (
+	activityTool     = "tool"
+	activityDelegate = "delegate"
 )
 
 // Control command names (Frame.Cmd) the host understands.

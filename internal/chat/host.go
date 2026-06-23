@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"plexus/pkg/brain"
 	"plexus/pkg/llm"
 	"plexus/pkg/mesh"
 	"plexus/protocol"
@@ -56,6 +58,7 @@ type Host struct {
 	curCorr       atomic.Value // string: correlation id of the turn the worker is on
 	mu            sync.Mutex
 	turnCancel    context.CancelFunc // cancels the in-flight turn (Ctrl-C resets the loop)
+	thinkBuf      strings.Builder    // accumulates the turn's thinking (worker goroutine only)
 }
 
 // NewHost assembles a chat agent and binds it to a mesh node under agentID. cfg
@@ -83,13 +86,36 @@ func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.O
 	cfg.OnUsage = func(u llm.Usage) {
 		h.send(context.Background(), h.turnCorr(), Frame{Kind: kindUsage, Text: usageLine(u)})
 	}
-	// Tool/delegation trace — observability over the bus, on the dedicated obs
-	// subject (sys.obs.<id>.trace), OFF the functional report channel. Fire-and-
-	// forget: with no subscriber NATS drops it. Consumers subscribe by wildcard
-	// (chat /trace, or `plexus watch`).
+	// Thinking is a first-class interaction stream — always shown inline. It is
+	// also buffered for a single obs.thinking emission per turn (so `plexus watch`
+	// gets the full reasoning without per-delta flooding). Called on the worker
+	// goroutine, so thinkBuf needs no lock.
+	cfg.OnThinking = func(t string) {
+		h.thinkBuf.WriteString(t)
+		h.send(context.Background(), h.turnCorr(), Frame{Kind: kindThinking, Text: t})
+	}
+	// Tool/delegation activity is a first-class interaction signal (like thinking):
+	// the user must see that the agent is working — especially during long-running
+	// delegation, whose result lands only after the sub-task finishes. So the START
+	// of every call is streamed inline as an always-on kindActivity frame.
+	cfg.OnToolStart = func(name, args string) {
+		sub := activityTool
+		if name == brain.DelegateToolName {
+			sub = activityDelegate
+		}
+		h.send(context.Background(), h.turnCorr(), Frame{Kind: kindActivity, Cmd: sub, Text: activityLine(name, args)})
+	}
+	// The COMPLETED call (with its result) is the verbose tap — observability over
+	// the bus on the dedicated obs subject (sys.obs.<id>.trace), OFF the functional
+	// report channel. Fire-and-forget: with no subscriber NATS drops it. Consumers
+	// subscribe by wildcard (chat /trace, or `plexus watch`).
 	cfg.OnTool = func(name, args, result string) {
-		line := fmt.Sprintf("%s(%s) → %s", name, preview(args, 200), preview(result, 600))
-		_ = h.node.Observe(context.Background(), "trace", []byte(line))
+		// A labelled multi-line block (name header, then args/result on their own
+		// aligned lines) reads far better than one long `name(args) -> result`
+		// line. The client indents the continuation lines under the [trace] tag;
+		// `plexus watch` shows the raw block.
+		body := fmt.Sprintf("%s\nargs:   %s\nresult: %s", name, preview(args, 400), preview(result, 1000))
+		_ = h.node.Observe(context.Background(), "trace", []byte(body))
 	}
 
 	opts := append([]mesh.Option{mesh.WithOnMessage(h.onMessage)}, nodeOpts...)
@@ -178,6 +204,7 @@ func (h *Host) Run(ctx context.Context) error {
 		// the workflow ctx — the agent stays alive and returns to the prompt.
 		tctx, tcancel := context.WithCancel(ctx)
 		h.setTurnCancel(tcancel)
+		h.thinkBuf.Reset()
 		reply, err := h.agent.Brain.Handle(tctx, protocol.Message{
 			Type:    protocol.TypeP2P,
 			Sender:  "user",
@@ -185,6 +212,9 @@ func (h *Host) Run(ctx context.Context) error {
 			Payload: []byte(text),
 		})
 		h.setTurnCancel(nil)
+		if h.thinkBuf.Len() > 0 {
+			_ = h.node.Observe(ctx, "thinking", []byte(h.thinkBuf.String())) // mirror to obs (one per turn)
+		}
 		// Capture whether the user interrupted THIS turn before we cancel tctx
 		// ourselves (our own tcancel would otherwise make tctx.Err() non-nil).
 		interrupted := tctx.Err() != nil
@@ -237,6 +267,32 @@ func taskOr(t string) string {
 
 func usageLine(u llm.Usage) string {
 	return fmt.Sprintf("tokens: in=%d out=%d total=%d", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+}
+
+// activityLine formats the one-line, always-on activity marker shown when a
+// tool/delegation call begins. Delegation renders distinctly (its objective)
+// from an ordinary effector call (name + brief args), so the user can tell when
+// a sub-task was spun up.
+func activityLine(name, args string) string {
+	if name == brain.DelegateToolName {
+		if obj := delegateObjective(args); obj != "" {
+			return "[delegate] " + preview(obj, 200)
+		}
+		return "[delegate] sub-task"
+	}
+	return "[tool] " + name + "(" + preview(args, 120) + ")"
+}
+
+// delegateObjective pulls the objective out of a delegate call's JSON arguments
+// for the activity line; "" if it cannot be parsed.
+func delegateObjective(args string) string {
+	var a struct {
+		Objective string `json:"objective"`
+	}
+	if json.Unmarshal([]byte(args), &a) != nil {
+		return ""
+	}
+	return a.Objective
 }
 
 // preview truncates s to n runes for a trace line, marking elision.

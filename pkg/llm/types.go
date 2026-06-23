@@ -46,8 +46,14 @@ type Usage struct {
 
 // StreamEvent represents a single event in the streaming response.
 type StreamEvent struct {
-	// DeltaText is the newly generated text chunk.
+	// DeltaText is the newly generated text chunk (the answer).
 	DeltaText string
+
+	// DeltaThinking is a newly generated chunk of the model's reasoning/thinking
+	// (Anthropic thinking blocks, OpenAI-compatible reasoning_content, or text
+	// inside <think>…</think>). It is shown to the user but is NOT part of the
+	// answer and does not re-enter history.
+	DeltaThinking string
 
 	// ToolCall is populated if the model is invoking a tool.
 	ToolCall *ToolCall

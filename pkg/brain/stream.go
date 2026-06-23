@@ -15,7 +15,7 @@ import (
 // event is returned. A stream-level error (event.Error or stream.Err) is returned
 // so the caller can decide how to surface it. Used by both the brain loop and the
 // delegation loop.
-func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools []llm.ToolDefinition, onDelta func(string)) (text string, calls []llm.ToolCall, usage llm.Usage, err error) {
+func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools []llm.ToolDefinition, onDelta, onThinking func(string)) (text string, calls []llm.ToolCall, usage llm.Usage, err error) {
 	es, err := gateway.GenerateStream(ctx, msgs, tools)
 	if err != nil {
 		return "", nil, usage, err
@@ -33,6 +33,11 @@ func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools
 			if onDelta != nil {
 				onDelta(ev.DeltaText)
 			}
+		}
+		// Thinking is shown live but never accumulated into the answer text, so it
+		// does not enter history (it is a draft, §5.7.9).
+		if ev.DeltaThinking != "" && onThinking != nil {
+			onThinking(ev.DeltaThinking)
 		}
 		if ev.ToolCall != nil {
 			calls = append(calls, *ev.ToolCall)

@@ -215,6 +215,25 @@ func TestBusApprovalDeny(t *testing.T) {
 	}
 }
 
+// A tool call streams an always-on activity marker the moment it starts (so the
+// user sees the agent working), before the final reply — no /trace needed.
+func TestBusToolActivityShown(t *testing.T) {
+	gw := &fakeGateway{turns: []scriptedTurn{
+		{calls: []llm.ToolCall{{ID: "x1", Name: "step_add", Arguments: `{"goal":"do the thing"}`}}}, // Write = auto-allowed
+		{text: "added"},
+	}}
+	fx := startBus(t, gw)
+	fx.say(t, "t1", "plan it")
+
+	act := fx.await(t, kindActivity)
+	if !strings.Contains(act.f.Text, "step_add") {
+		t.Fatalf("activity = %q, want the tool name", act.f.Text)
+	}
+	if rep := fx.await(t, kindReply); rep.f.Text != "added" {
+		t.Fatalf("reply = %q", rep.f.Text)
+	}
+}
+
 func TestBusControlToolsAndStatus(t *testing.T) {
 	fx := startBus(t, &fakeGateway{})
 
@@ -250,6 +269,86 @@ func TestBusControlReset(t *testing.T) {
 	}
 	if n := len(fx.host.agent.Brain.History()); n != 2 {
 		t.Fatalf("history len after reset = %d, want 2 (kernel + role card)", n)
+	}
+}
+
+// thinkingStream emits a thinking delta, then an answer delta, then finishes.
+type thinkingStream struct {
+	evs []llm.StreamEvent
+	i   int
+}
+
+func (s *thinkingStream) Next() bool               { s.i++; return s.i <= len(s.evs) }
+func (s *thinkingStream) Current() llm.StreamEvent { return s.evs[s.i-1] }
+func (s *thinkingStream) Err() error               { return nil }
+func (s *thinkingStream) Close() error             { return nil }
+
+type thinkingGateway struct{}
+
+func (thinkingGateway) GenerateStream(context.Context, []llm.Message, []llm.ToolDefinition) (llm.EventStream, error) {
+	return &thinkingStream{evs: []llm.StreamEvent{
+		{DeltaThinking: "let me reason… "},
+		{DeltaThinking: "ok."},
+		{DeltaText: "the answer"},
+		{FinishReason: "stop"},
+	}}, nil
+}
+
+// Thinking is streamed inline as kindThinking, mirrored once to sys.obs.<id>.
+// thinking, and never enters the brain's history (it is a draft).
+func TestBusThinkingStreamAndObs(t *testing.T) {
+	fx := startBus(t, thinkingGateway{})
+
+	// Watch the obs.thinking stream like `plexus watch` would.
+	nc, err := nats.Connect(fx.url)
+	if err != nil {
+		t.Fatalf("nats: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	obs := make(chan string, 4)
+	_, _ = nc.Subscribe("sys.obs."+fx.agentID+".thinking", func(m *nats.Msg) {
+		var msg protocol.Message
+		if json.Unmarshal(m.Data, &msg) == nil {
+			obs <- string(msg.Payload)
+		}
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	fx.say(t, "t1", "think about it")
+	fs := fx.collectUntil(t, kindReply)
+
+	// Thinking arrived as kindThinking frames; the answer as kindDelta.
+	var think, answer string
+	for _, in := range fs {
+		switch in.f.Kind {
+		case kindThinking:
+			think += in.f.Text
+		case kindDelta:
+			answer += in.f.Text
+		}
+	}
+	if think != "let me reason… ok." {
+		t.Fatalf("thinking frames = %q", think)
+	}
+	if answer != "the answer" {
+		t.Fatalf("answer frames = %q", answer)
+	}
+
+	// One obs.thinking mirror per turn carries the full reasoning.
+	select {
+	case line := <-obs:
+		if line != "let me reason… ok." {
+			t.Fatalf("obs.thinking = %q", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no obs.thinking emitted")
+	}
+
+	// Thinking must NOT be in history; only the answer is.
+	for _, f := range fx.host.agent.Brain.History() {
+		if strings.Contains(f.Content, "let me reason") {
+			t.Fatalf("thinking leaked into history: %q", f.Content)
+		}
 	}
 }
 
@@ -370,6 +469,11 @@ func TestBusUnconfiguredGatewayAndKey(t *testing.T) {
 	fx.ctrl(t, "c4", cmdReasoning, "max")
 	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "max") {
 		t.Fatalf("/reasoning max = %q", r.f.Text)
+	}
+	// No-arg /reasoning is a GET — it reports the current tier, never sets off.
+	fx.ctrl(t, "c4b", cmdReasoning, "")
+	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "reasoning = max") {
+		t.Fatalf("/reasoning (no arg) = %q, want current tier", r.f.Text)
 	}
 	fx.ctrl(t, "c5", cmdStatus, "")
 	if r := fx.await(t, kindCtrl); !strings.Contains(r.f.Text, "reasoning=max") {
