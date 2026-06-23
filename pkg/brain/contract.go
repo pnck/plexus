@@ -15,7 +15,11 @@
 // max-turns bound.
 package brain
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"plexus/pkg/jsonschema"
+)
 
 // Briefing is the downward half of the delegation contract (§5.7.7): the only
 // channel into a fresh delegation. It carries the objective, scope (including
@@ -54,35 +58,27 @@ type Result struct {
 // spawns a fresh delegation.
 const delegateToolName = "delegate"
 
-// delegateSchema is the JSON schema for the delegate tool's arguments; its fields
-// map 1:1 onto Briefing.
+// delegateSchema is the JSON schema for the delegate tool's arguments. It is
+// reflected from delegateArgs (jsonschema.For) — the struct, with its tags, is
+// the single source of truth, exactly as for the built-in effectors. delegate is
+// not an effector (it spawns cognition), but it describes its arguments to the
+// LLM the same way.
 func delegateSchema() json.RawMessage {
-	return json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "objective":   { "type": "string", "description": "What the delegation must accomplish." },
-    "scope":       { "type": "string", "description": "In-scope work." },
-    "out_of_scope":{ "type": "string", "description": "Explicitly out-of-scope; do not touch." },
-    "pointers":    { "type": "array", "items": { "type": "string" }, "description": "File/doc paths the delegation reads itself (pointers, not payload)." },
-    "constraints": { "type": "string", "description": "Invariants the delegation must hold." },
-    "acceptance":  { "type": "string", "description": "Acceptance criteria." },
-    "return_spec": { "type": "string", "description": "Shape of the expected distilled result." }
-  },
-  "required": ["objective"],
-  "additionalProperties": false
-}`)
+	return jsonschema.For[delegateArgs]()
 }
 
 // delegateArgs is the wire form of the delegate tool's arguments. It mirrors
-// Briefing field-for-field (only the JSON wire names differ).
+// Briefing field-for-field (only the JSON wire names differ), so briefing() is a
+// direct struct conversion; the desc/omitempty tags drive the reflected schema
+// and do not affect that conversion (Go ignores tags when converting structs).
 type delegateArgs struct {
-	Objective   string   `json:"objective"`
-	Scope       string   `json:"scope"`
-	OutOfScope  string   `json:"out_of_scope"`
-	Pointers    []string `json:"pointers"`
-	Constraints string   `json:"constraints"`
-	Acceptance  string   `json:"acceptance"`
-	ReturnSpec  string   `json:"return_spec"`
+	Objective   string   `json:"objective" desc:"What the delegation must accomplish."`
+	Scope       string   `json:"scope,omitempty" desc:"In-scope work."`
+	OutOfScope  string   `json:"out_of_scope,omitempty" desc:"Explicitly out-of-scope; do not touch."`
+	Pointers    []string `json:"pointers,omitempty" desc:"File/doc paths the delegation reads itself (pointers, not payload)."`
+	Constraints string   `json:"constraints,omitempty" desc:"Invariants the delegation must hold."`
+	Acceptance  string   `json:"acceptance,omitempty" desc:"Acceptance criteria."`
+	ReturnSpec  string   `json:"return_spec,omitempty" desc:"Shape of the expected distilled result."`
 }
 
 // briefing converts the wire args into a Briefing (the field-for-field mirror

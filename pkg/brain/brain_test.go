@@ -323,14 +323,21 @@ func TestRoleCardSeedsL1(t *testing.T) {
 
 	b := New(Options{Gateway: &fakeGateway{}, RoleCard: sp, Inbound: directInbound{}})
 	h := b.History()
-	if len(h) != 1 || h[0].Authority != protocol.AuthSystem {
-		t.Fatalf("role card not seeded as a single L1 frame: %+v", h)
+	// L1 = kernel principles frame FIRST, then the role card frame (§5.7.11).
+	if len(h) != 2 || h[0].Provenance != "principles" || h[1].Provenance != "role_card" {
+		t.Fatalf("L1 not seeded as [principles, role_card]: %+v", h)
 	}
-	// compose: an L1 frame must render first as a system message.
+	if h[0].Authority != protocol.AuthSystem || h[1].Authority != protocol.AuthSystem {
+		t.Fatalf("L1 frames must be AuthSystem: %+v", h)
+	}
+	// compose: the kernel renders first, the role card second, both as system.
 	b2 := New(Options{Gateway: &fakeGateway{}, RoleCard: sp, Inbound: directInbound{}})
 	b2.history = append(b2.history, Frame{Authority: protocol.AuthUser, Role: llm.RoleUser, Content: "hello"})
 	msgs := compose(b2.history)
-	if msgs[0].Role != llm.RoleSystem || !strings.Contains(msgs[0].Content, "Dev agent") {
-		t.Fatalf("L1 system frame not rendered first: %+v", msgs)
+	if msgs[0].Role != llm.RoleSystem || !strings.Contains(msgs[0].Content, "KERNEL") {
+		t.Fatalf("kernel principles not rendered first: %+v", msgs[0])
+	}
+	if msgs[1].Role != llm.RoleSystem || !strings.Contains(msgs[1].Content, "Dev agent") {
+		t.Fatalf("role card not rendered as the second system frame: %+v", msgs[1])
 	}
 }

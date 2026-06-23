@@ -56,8 +56,10 @@ func (f FuncApprover) RequestApproval(ctx context.Context, eff effector.Effector
 type Brain struct {
 	gateway            llm.Provider
 	reg                *effector.Registry
-	roleCard           RoleCard // structured role card; its SystemPrompt seeds the L1 frame
+	roleCard           RoleCard // structured role card; its SystemPrompt seeds an L1 frame (after the kernel)
+	emitter            Emitter  // outbound seam to the control plane (task_* events, §5.7.10)
 	history            []Frame  // in-memory working memory (SQLite checkpoint is E2.5)
+	currentTask        string   // TaskID of the message being handled; scopes effectors and task_report
 	inbound            Inbound
 	approver           Approver
 	maxTurns           int // cognitive-loop bound (runaway-model guard)
@@ -79,6 +81,10 @@ type Options struct {
 	RoleCard RoleCard
 	Inbound  Inbound
 	Approver Approver
+	// Emitter is the outbound seam to the control plane for task_* domain events
+	// (§5.7.10). Defaults to NopEmitter (drops events) when nil — the real
+	// JetStream/control-plane impl lands with E1.2/E5.
+	Emitter Emitter
 	// MaxTurns bounds the brain's cognitive loop against a runaway model.
 	// Defaults to 32 when 0.
 	MaxTurns int
@@ -102,15 +108,29 @@ func New(opt Options) *Brain {
 	if delegationMaxTurns == 0 {
 		delegationMaxTurns = defaultDelegationMaxTurns
 	}
+	emitter := opt.Emitter
+	if emitter == nil {
+		emitter = NopEmitter{}
+	}
 	b := &Brain{
 		gateway:            opt.Gateway,
 		reg:                opt.Registry,
 		roleCard:           opt.RoleCard,
+		emitter:            emitter,
 		inbound:            opt.Inbound,
 		approver:           app,
 		maxTurns:           maxTurns,
 		delegationMaxTurns: delegationMaxTurns,
 	}
+	// L1 kernel: the built-in operating principles seed the highest layer FIRST
+	// (§5.7.11), so the universal invariants precede the role card's
+	// specialization. compose() renders all system frames in order.
+	b.history = append(b.history, Frame{
+		Authority:  protocol.AuthSystem,
+		Provenance: "principles",
+		Role:       llm.RoleSystem,
+		Content:    principlesPrompt,
+	})
 	if opt.RoleCard.SystemPrompt != "" {
 		b.history = append(b.history, Frame{
 			Authority:  protocol.AuthSystem,
@@ -141,6 +161,7 @@ func (b *Brain) Step(ctx context.Context) (string, error) {
 		return "", err
 	}
 	// ① stamp authority by source channel (Sender → L-layer, §5.7.3).
+	b.currentTask = msg.TaskID
 	b.history = append(b.history, frameFromInbound(msg))
 	return b.run(ctx)
 }
@@ -148,6 +169,7 @@ func (b *Brain) Step(ctx context.Context) (string, error) {
 // Handle injects an already-constructed inbound message (bypassing Inbound) and
 // runs the loop. Useful for tests and for callers that already hold the message.
 func (b *Brain) Handle(ctx context.Context, msg protocol.Message) (string, error) {
+	b.currentTask = msg.TaskID
 	b.history = append(b.history, frameFromInbound(msg))
 	return b.run(ctx)
 }
@@ -188,9 +210,12 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 			Content:    text,
 			ToolCalls:  calls,
 		})
-		// Dispatch each call, absorbing the result as an L3/L4 frame.
+		// Dispatch each call, absorbing the result as an L3/L4 frame. Effectors run
+		// under the current task's scope (§5.7.10) so task-scoped tools — working
+		// memory and the step_* checkpoint primitives — address the right task.
+		dctx := effector.WithTaskScope(ctx, b.currentTask)
 		for _, call := range calls {
-			content := b.dispatch(ctx, call)
+			content := b.dispatch(dctx, call)
 			b.history = append(b.history, Frame{
 				Authority:  protocol.AuthTool, // ⑥ tool/delegation results are L3 data
 				Provenance: call.Name,
@@ -218,6 +243,10 @@ func (b *Brain) toolSurface() []llm.ToolDefinition {
 		Description: "Delegate a self-contained, flood-producing sub-task to a fresh isolated delegation. It runs with a curated capability envelope and returns ONLY a distilled result. Use when the work is self-containable via a briefing; inline trivial work yourself.",
 		Parameters:  delegateSchema(),
 	})
+	// Brain-owned task channel tools (§5.7.10): these emit domain events to the
+	// control plane via the bus, which the brain owns — so they are brain tools,
+	// not effectors, and never reach a delegation's envelope.
+	defs = append(defs, taskToolDefs()...)
 	return defs
 }
 
@@ -225,10 +254,14 @@ func (b *Brain) toolSurface() []llm.ToolDefinition {
 // result content. A delegate call spawns a fresh delegation; any other name is an
 // effector call gated by the approval hook.
 func (b *Brain) dispatch(ctx context.Context, call llm.ToolCall) string {
-	if call.Name == delegateToolName {
+	switch call.Name {
+	case delegateToolName:
 		return b.delegate(ctx, call)
+	case taskReportToolName, taskRevertToolName:
+		return b.emitTask(ctx, call)
+	default:
+		return b.runEffector(ctx, call)
 	}
-	return b.runEffector(ctx, call)
 }
 
 // runEffector dispatches an effector call: it consults the policy's approval
