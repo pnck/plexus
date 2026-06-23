@@ -73,6 +73,23 @@ type Result struct {
 	IsError bool
 }
 
+// AgentPrivate is an optional interface an effector implements to opt OUT of the
+// delegation capability envelope even when it is approval-free. It marks tools
+// that belong to the agent's brain alone — memory (mem_*/ltm_*) is agent-private
+// because a delegation has no persistent memory (§5.7.7): its job is to run a
+// lean, stateless LLM↔tools loop and return a distilled Result. An effector that
+// does not implement this interface (or returns false) is treated as shareable.
+type AgentPrivate interface {
+	// AgentPrivate reports whether this effector is excluded from delegations.
+	AgentPrivate() bool
+}
+
+// isAgentPrivate reports whether e has opted out of the delegation envelope.
+func isAgentPrivate(e Effector) bool {
+	ap, ok := e.(AgentPrivate)
+	return ok && ap.AgentPrivate()
+}
+
 // Effector is one tool the brain (or a delegation) can invoke. Implementations
 // must be safe for concurrent use.
 type Effector interface {
