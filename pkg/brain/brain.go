@@ -67,6 +67,7 @@ type Brain struct {
 	onUsage            func(llm.Usage)                 // optional: per-turn token usage sink (nil = off)
 	onToolStart        func(name, args string)         // optional: BEFORE each tool/delegation dispatch (live activity)
 	onTool             func(name, args, result string) // optional: AFTER each tool/delegation dispatch (observability)
+	onDelegTrace       func(string)                    // optional: a spawned delegation's transcript lines (observability)
 	maxTurns           int                             // cognitive-loop bound (runaway-model guard)
 	delegationMaxTurns int                             // bound passed to each spawned delegation's loop
 }
@@ -114,6 +115,12 @@ type Options struct {
 	// name, its JSON arguments, and the result fed back to the model — a pure
 	// observability tap (the result still flows into history regardless).
 	OnTool func(name, args, result string)
+	// OnDelegTrace, if set, receives a spawned delegation's transcript line by
+	// line (each turn's assistant text, tool calls, and results). The delegation
+	// itself has no bus endpoint (§5.7.7); the brain — which DOES — taps it on the
+	// delegation's behalf, so this preserves the invariant while making the
+	// otherwise-invisible sub-cognition observable (sys.obs.<id>.deleg).
+	OnDelegTrace func(string)
 }
 
 // New constructs a Brain and seeds its history with the role card as the L1
@@ -147,6 +154,7 @@ func New(opt Options) *Brain {
 		onUsage:            opt.OnUsage,
 		onToolStart:        opt.OnToolStart,
 		onTool:             opt.OnTool,
+		onDelegTrace:       opt.OnDelegTrace,
 		maxTurns:           maxTurns,
 		delegationMaxTurns: delegationMaxTurns,
 	}
@@ -237,7 +245,7 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 		// ② compose() renders frames into a layered message list.
 		msgs := compose(b.history)
 		// ③ gateway stream + ④ parse StreamEvents. (No mode gate — plexus has none.)
-		text, calls, usage, err := stream(ctx, b.gateway, msgs, tools, b.onDelta, b.onThinking)
+		text, calls, reasoning, usage, err := stream(ctx, b.gateway, msgs, tools, b.onDelta, b.onThinking)
 		if err != nil {
 			return "", err
 		}
@@ -264,12 +272,16 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 			return text, nil
 		}
 		// Record the assistant's tool-call turn so the wire history is well-formed.
+		// Reasoning blocks are kept ONLY on this tool-call turn (the only place a
+		// provider needs them replayed); they are opaque attestation, never shown
+		// and never composed as readable context.
 		b.history = append(b.history, Frame{
 			// assistant's tool-call turn — not an input-trust layer; compose keys off Role.
 			Provenance: "assistant",
 			Role:       llm.RoleAssistant,
 			Content:    text,
 			ToolCalls:  calls,
+			Reasoning:  reasoning,
 		})
 		// Dispatch each call, absorbing the result as an L3/L4 frame. Effectors run
 		// under the current task's scope (§5.7.10) so task-scoped tools — working
@@ -382,7 +394,7 @@ func (b *Brain) delegate(ctx context.Context, call llm.ToolCall) string {
 	if b.reg != nil {
 		caps = b.reg.DelegationEnvelope() // curated 能力封套 — NOT the full registry
 	}
-	ch := spawnDelegation(ctx, b.gateway, caps, a.briefing(), b.delegationMaxTurns)
+	ch := spawnDelegation(ctx, b.gateway, caps, a.briefing(), b.delegationMaxTurns, b.onDelegTrace)
 	select {
 	case r := <-ch:
 		return renderResult(r)

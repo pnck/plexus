@@ -11,8 +11,10 @@
 // A delegation is a lean, fresh-only LLM<->tools loop with no bus endpoint, no
 // registry, no role card, no inbound and no persistent memory. Its only output
 // is a distilled Result on a channel. These invariants are enforced structurally:
-// spawnDelegation takes ONLY a gateway, a capability envelope, a Briefing, and a
-// max-turns bound.
+// spawnDelegation takes ONLY a gateway, a capability envelope, a Briefing, a
+// max-turns bound, and an optional transcript sink (a plain callback the brain
+// supplies to mirror the sub-cognition to observability on its behalf — NOT a
+// bus endpoint the delegation itself holds).
 package brain
 
 import (

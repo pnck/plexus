@@ -1,10 +1,66 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"testing"
 
 	"plexus/pkg/llm"
 )
+
+// An assistant turn that called a tool must serialize with the full content-block
+// structure Anthropic requires: any signed thinking block FIRST (extended-thinking
+// replay rule), then text, then the tool_use block; the tool result becomes a
+// tool_result block. The old "simplified" mapping dropped the tool_use entirely.
+func TestToAnthropicMessagesToolUseAndThinkingReplay(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: "you are a bot"},
+		{Role: llm.RoleUser, Content: "do it"},
+		{
+			Role:      llm.RoleAssistant,
+			Content:   "let me check",
+			ToolCalls: []llm.ToolCall{{ID: "t1", Name: "read_file", Arguments: `{"path":"/x"}`}},
+			Reasoning: []llm.ReasoningBlock{{Text: "I should read the file", Signature: "sig-abc"}},
+		},
+		{Role: llm.RoleTool, ToolCallID: "t1", Content: "file contents"},
+	}
+
+	out, system := toAnthropicMessages(msgs)
+
+	if len(system) != 1 || system[0].Text != "you are a bot" {
+		t.Fatalf("system blocks = %+v", system)
+	}
+	if len(out) != 3 { // user, assistant, user(tool_result)
+		t.Fatalf("message count = %d, want 3", len(out))
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+
+	// The tool_use block (and its input) must be present — the old mapping lost it.
+	for _, want := range []string{"tool_use", "read_file", `"path":"/x"`, "tool_result", "file contents", "sig-abc"} {
+		if !contains(s, want) {
+			t.Fatalf("serialized messages missing %q: %s", want, s)
+		}
+	}
+	// Ordering inside the assistant turn: thinking (signature) precedes the
+	// tool_use it produced.
+	if idx(s, "sig-abc") > idx(s, "tool_use") {
+		t.Fatalf("thinking block must precede tool_use: %s", s)
+	}
+}
+
+func contains(s, sub string) bool { return idx(s, sub) >= 0 }
+func idx(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
 
 // The unified effort level maps to an extended-thinking token budget (≥1024),
 // and WithReasoningEffort flows it to the provider; an unknown/empty level

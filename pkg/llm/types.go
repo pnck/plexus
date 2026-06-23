@@ -20,6 +20,21 @@ type Message struct {
 
 	// ToolCallID is used when Role == RoleTool to specify which call this result is for.
 	ToolCallID string
+
+	// Reasoning carries provider-opaque thinking blocks that must be replayed
+	// verbatim on an assistant turn that also called tools (Anthropic extended
+	// thinking requires the signed thinking block to precede the tool_use it
+	// led to). It is NOT human-facing context and providers that don't need it
+	// (OpenAI) ignore it.
+	Reasoning []ReasoningBlock
+}
+
+// ReasoningBlock is one completed thinking block emitted by the model. Text is
+// the reasoning; Signature is the provider's opaque attestation required to
+// replay it (empty when the provider does not sign thinking).
+type ReasoningBlock struct {
+	Text      string
+	Signature string
 }
 
 // ToolCall represents a single tool invocation request from the model.
@@ -57,6 +72,12 @@ type StreamEvent struct {
 
 	// ToolCall is populated if the model is invoking a tool.
 	ToolCall *ToolCall
+
+	// ReasoningBlock is populated on the event that closes a thinking block,
+	// carrying the full reasoning text plus its signature for verbatim replay.
+	// (DeltaThinking carries the same text incrementally for live display; this
+	// is the once-per-block, signed form used to round-trip through history.)
+	ReasoningBlock *ReasoningBlock
 
 	// FinishReason indicates why generation stopped (e.g., "stop", "tool_calls", "length").
 	FinishReason string

@@ -120,24 +120,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 
 // GenerateStream calls the Anthropic Messages streaming API.
 func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools []llm.ToolDefinition) (llm.EventStream, error) {
-	var anthropicMsgs []anthropic.MessageParam
-	var systemBlocks []anthropic.TextBlockParam
-
-	for _, m := range msgs {
-		switch m.Role {
-		case llm.RoleSystem:
-			// Anthropic separates system prompts from the main message array
-			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: m.Content})
-		case llm.RoleUser:
-			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
-		case llm.RoleAssistant:
-			// Simplified mapping, real code needs to map tool calls correctly
-			anthropicMsgs = append(anthropicMsgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
-		case llm.RoleTool:
-			// Map to tool result blocks
-			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false)))
-		}
-	}
+	anthropicMsgs, systemBlocks := toAnthropicMessages(msgs)
 
 	var anthropicTools []anthropic.ToolUnionParam
 	for _, t := range tools {
@@ -179,6 +162,59 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	return &anthropicStream{stream: stream}, nil
 }
 
+// toAnthropicMessages maps our unified messages to Anthropic's request shape:
+// system prompts are pulled out into separate blocks, and an assistant turn that
+// called tools is rendered with the full content-block structure Anthropic
+// requires — any preserved thinking blocks FIRST (extended thinking demands the
+// signed block precede the tool_use it produced), then text, then one tool_use
+// block per call. Tool results map to tool_result blocks on a user message.
+// Extracted so this structure is unit-testable without a live endpoint.
+func toAnthropicMessages(msgs []llm.Message) ([]anthropic.MessageParam, []anthropic.TextBlockParam) {
+	var anthropicMsgs []anthropic.MessageParam
+	var systemBlocks []anthropic.TextBlockParam
+
+	for _, m := range msgs {
+		switch m.Role {
+		case llm.RoleSystem:
+			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: m.Content})
+		case llm.RoleUser:
+			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+		case llm.RoleAssistant:
+			var blocks []anthropic.ContentBlockParamUnion
+			// Signed thinking blocks must lead the assistant turn (replay rule).
+			for _, rb := range m.Reasoning {
+				if rb.Signature != "" {
+					blocks = append(blocks, anthropic.NewThinkingBlock(rb.Signature, rb.Text))
+				}
+			}
+			if m.Content != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				var input any
+				if json.Unmarshal([]byte(tc.Arguments), &input) != nil {
+					input = map[string]any{}
+				}
+				blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
+			}
+			if len(blocks) == 0 {
+				blocks = append(blocks, anthropic.NewTextBlock(""))
+			}
+			anthropicMsgs = append(anthropicMsgs, anthropic.NewAssistantMessage(blocks...))
+		case llm.RoleTool:
+			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false)))
+		}
+	}
+	return anthropicMsgs, systemBlocks
+}
+
+// pendingThinkingBlock accumulates a thinking content block: its text arrives via
+// thinking_delta and its signature via signature_delta, completed at block stop.
+type pendingThinkingBlock struct {
+	text strings.Builder
+	sig  string
+}
+
 // pendingToolBlock accumulates a tool_use content block across input_json_delta events.
 type pendingToolBlock struct {
 	id    string
@@ -195,6 +231,10 @@ type anthropicStream struct {
 
 	// blocks maps a content-block index to its in-progress tool_use accumulation.
 	blocks map[int64]*pendingToolBlock
+
+	// thinks maps a content-block index to its in-progress thinking accumulation
+	// (text + signature), so the completed signed block can be emitted at stop.
+	thinks map[int64]*pendingThinkingBlock
 
 	// usage accumulates token counts: input from message_start, output from message_delta.
 	usage llm.Usage
@@ -215,13 +255,20 @@ func (s *anthropicStream) Next() bool {
 			s.usage.PromptTokens = ev.Message.Usage.InputTokens
 
 		case anthropic.ContentBlockStartEvent:
-			// A tool_use block opening — start accumulating its input JSON.
+			// A tool_use block opening — start accumulating its input JSON. A
+			// thinking block opening — start accumulating its text + signature.
 			block := ev.ContentBlock
-			if block.Type == "tool_use" {
+			switch block.Type {
+			case "tool_use":
 				if s.blocks == nil {
 					s.blocks = map[int64]*pendingToolBlock{}
 				}
 				s.blocks[ev.Index] = &pendingToolBlock{id: block.ID, name: block.Name}
+			case "thinking":
+				if s.thinks == nil {
+					s.thinks = map[int64]*pendingThinkingBlock{}
+				}
+				s.thinks[ev.Index] = &pendingThinkingBlock{}
 			}
 
 		case anthropic.ContentBlockDeltaEvent:
@@ -232,9 +279,17 @@ func (s *anthropicStream) Next() bool {
 					return true
 				}
 			case anthropic.ThinkingDelta:
+				if tb := s.thinks[ev.Index]; tb != nil {
+					tb.text.WriteString(delta.Thinking)
+				}
 				if delta.Thinking != "" {
 					s.current = llm.StreamEvent{DeltaThinking: delta.Thinking}
 					return true
+				}
+			case anthropic.SignatureDelta:
+				// The thinking block's attestation — kept for verbatim replay, not shown.
+				if tb := s.thinks[ev.Index]; tb != nil {
+					tb.sig = delta.Signature
 				}
 			case anthropic.InputJSONDelta:
 				if pb, ok := s.blocks[ev.Index]; ok {
@@ -252,6 +307,14 @@ func (s *anthropicStream) Next() bool {
 						Name:      pb.name,
 						Arguments: pb.input.String(),
 					},
+				}
+				return true
+			}
+			// A thinking block closed — emit the completed signed block for replay.
+			if tb, ok := s.thinks[ev.Index]; ok {
+				delete(s.thinks, ev.Index)
+				s.current = llm.StreamEvent{
+					ReasoningBlock: &llm.ReasoningBlock{Text: tb.text.String(), Signature: tb.sig},
 				}
 				return true
 			}

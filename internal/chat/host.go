@@ -117,11 +117,23 @@ func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.O
 		body := fmt.Sprintf("%s\nargs:   %s\nresult: %s", name, preview(args, 400), preview(result, 1000))
 		_ = h.node.Observe(context.Background(), "trace", []byte(body))
 	}
+	// A spawned delegation's transcript — the otherwise-opaque sub-cognition — on
+	// its own obs subject (sys.obs.<id>.deleg). The brain taps it for us (the
+	// delegation has no endpoint of its own). Fire-and-forget like the others.
+	cfg.OnDelegTrace = func(line string) {
+		_ = h.node.Observe(context.Background(), "deleg", []byte(line))
+	}
 
 	opts := append([]mesh.Option{mesh.WithOnMessage(h.onMessage)}, nodeOpts...)
 	node := mesh.NewNode(agentID, opts...)
 	h.node = node
 	h.reportSubject = node.Options.ReportSubject
+
+	// Now the node exists, route the gateway's raw LLM req/resp to obs
+	// (sys.obs.<id>.raw) — independent of /debug (which echoes to stdout).
+	if h.gw != nil {
+		h.gw.setRawObs(func(b []byte) { _ = h.node.Observe(context.Background(), "raw", b) })
+	}
 
 	agent, err := New(ctx, cfg)
 	if err != nil {

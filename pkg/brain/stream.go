@@ -15,10 +15,10 @@ import (
 // event is returned. A stream-level error (event.Error or stream.Err) is returned
 // so the caller can decide how to surface it. Used by both the brain loop and the
 // delegation loop.
-func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools []llm.ToolDefinition, onDelta, onThinking func(string)) (text string, calls []llm.ToolCall, usage llm.Usage, err error) {
+func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools []llm.ToolDefinition, onDelta, onThinking func(string)) (text string, calls []llm.ToolCall, reasoning []llm.ReasoningBlock, usage llm.Usage, err error) {
 	es, err := gateway.GenerateStream(ctx, msgs, tools)
 	if err != nil {
-		return "", nil, usage, err
+		return "", nil, nil, usage, err
 	}
 	defer func() { _ = es.Close() }()
 
@@ -26,7 +26,7 @@ func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools
 	for es.Next() {
 		ev := es.Current()
 		if ev.Error != nil {
-			return string(sb), calls, usage, ev.Error
+			return string(sb), calls, reasoning, usage, ev.Error
 		}
 		if ev.DeltaText != "" {
 			sb = append(sb, ev.DeltaText...)
@@ -35,9 +35,14 @@ func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools
 			}
 		}
 		// Thinking is shown live but never accumulated into the answer text, so it
-		// does not enter history (it is a draft, §5.7.9).
+		// does not enter history (it is a draft, §5.7.9). The completed, SIGNED
+		// block is captured separately for verbatim replay on a tool-call turn —
+		// it is opaque attestation, not readable context.
 		if ev.DeltaThinking != "" && onThinking != nil {
 			onThinking(ev.DeltaThinking)
+		}
+		if ev.ReasoningBlock != nil {
+			reasoning = append(reasoning, *ev.ReasoningBlock)
 		}
 		if ev.ToolCall != nil {
 			calls = append(calls, *ev.ToolCall)
@@ -47,9 +52,9 @@ func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools
 		}
 	}
 	if e := es.Err(); e != nil {
-		return string(sb), calls, usage, e
+		return string(sb), calls, reasoning, usage, e
 	}
-	return string(sb), calls, usage, nil
+	return string(sb), calls, reasoning, usage, nil
 }
 
 // toolDefs converts a slice of effectors into LLM tool definitions (name /

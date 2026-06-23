@@ -23,10 +23,15 @@ import (
 // and NO way to spawn further delegations. Its context is fresh: history is
 // seeded solely by the briefing system prompt. Cancelling ctx kills the
 // goroutine; its only exit is the returned channel.
-func spawnDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capabilities, b Briefing, maxTurns int) <-chan Result {
+// observe is an optional brain-side transcript sink (nil = off). It is NOT a bus
+// endpoint and does not weaken the hard invariants: the delegation still gets no
+// nats.Conn, no Registry, no role card, no Inbound, no persistent memory. The
+// brain (which has an endpoint) passes it so it can mirror the otherwise-opaque
+// sub-cognition to observability on the delegation's behalf (§5.7.7).
+func spawnDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capabilities, b Briefing, maxTurns int, observe func(string)) <-chan Result {
 	ch := make(chan Result, 1)
 	go func() {
-		ch <- runDelegation(ctx, gateway, caps, b, maxTurns)
+		ch <- runDelegation(ctx, gateway, caps, b, maxTurns, observe)
 		// Goroutine exits; the delegation is dead after one Result.
 	}()
 	return ch
@@ -39,9 +44,16 @@ func spawnDelegation(ctx context.Context, gateway llm.Provider, caps effector.Ca
 // model's last text into a Result. maxTurns bounds the loop so a misbehaving
 // model cannot spin forever; the brain treats a hit bound as a distilled (if
 // partial) Result.
-func runDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capabilities, b Briefing, maxTurns int) Result {
+func runDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capabilities, b Briefing, maxTurns int, observe func(string)) Result {
 	history := []llm.Message{{Role: llm.RoleSystem, Content: briefingPrompt(b)}}
 	tools := toolDefs(caps.List())
+
+	trace := func(format string, args ...any) {
+		if observe != nil {
+			observe(fmt.Sprintf(format, args...))
+		}
+	}
+	trace("objective: %s", b.Objective)
 
 	var lastText string
 	for turn := 0; turn < maxTurns; turn++ {
@@ -49,21 +61,26 @@ func runDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capa
 			return Result{Summary: "delegation cancelled", OpenQuestions: err.Error()}
 		}
 		// A delegation does not stream to the user; pass nil sinks, ignore usage.
-		text, calls, _, err := stream(ctx, gateway, history, tools, nil, nil)
+		text, calls, reasoning, _, err := stream(ctx, gateway, history, tools, nil, nil)
 		if err != nil {
 			return Result{Summary: "delegation gateway error", OpenQuestions: err.Error()}
 		}
 		if text != "" {
 			lastText = text
+			trace("[turn %d] %s", turn, delegPreview(text))
 		}
 		if len(calls) == 0 {
 			// Final turn: distill the last text into a Result.
+			trace("[done] distilled result")
 			return distill(lastText)
 		}
-		// Record the assistant's tool-call turn, then answer each call.
-		history = append(history, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: calls})
+		// Record the assistant's tool-call turn (with any signed thinking blocks to
+		// replay), then answer each call.
+		history = append(history, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: calls, Reasoning: reasoning})
 		for _, call := range calls {
+			trace("[turn %d] call %s(%s)", turn, call.Name, delegPreview(call.Arguments))
 			content := invokeEnvelope(ctx, caps, call)
+			trace("[turn %d] result %s", turn, delegPreview(content))
 			history = append(history, llm.Message{
 				Role:       llm.RoleTool,
 				ToolCallID: call.ID,
@@ -75,6 +92,17 @@ func runDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capa
 		Summary:       distill(lastText).Summary,
 		OpenQuestions: fmt.Sprintf("delegation hit max turns (%d) without converging", maxTurns),
 	}
+}
+
+// delegPreview collapses newlines and truncates a transcript fragment so a
+// delegation trace line stays one line.
+func delegPreview(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	const n = 300
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // invokeEnvelope runs one tool call through the capability envelope, translating

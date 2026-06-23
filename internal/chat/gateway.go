@@ -36,6 +36,11 @@ type GatewayConfig struct {
 	APIKey    string
 	Debug     bool   // print raw request body + response status (no auth headers)
 	Reasoning string // "" | low | medium | high — reasoning effort / thinking budget
+
+	// rawObs, when set, receives the raw LLM request/response (no auth headers)
+	// for mirroring to observability (sys.obs.<id>.raw). It rides on the config
+	// so it survives a reconfigure() rebuild. Not a user-facing field.
+	rawObs func([]byte)
 }
 
 // ResolveGateway fills a GatewayConfig from explicit flags falling back to env.
@@ -79,8 +84,16 @@ func (c GatewayConfig) Build() (llm.Provider, error) {
 		if c.Debug {
 			opts = append(opts, openai.WithMiddleware(debugMiddleware(os.Stdout)))
 		}
+		if c.rawObs != nil {
+			opts = append(opts, openai.WithMiddleware(rawObsMiddleware(c.rawObs)))
+		}
 		if c.Reasoning != "" {
 			opts = append(opts, openai.WithReasoningEffort(c.Reasoning))
+		} else if base != "" {
+			// Reasoning off on a custom (compatible) gateway: best-effort suppress
+			// think-by-default models (Qwen/DashScope). Gated on a non-default base
+			// URL so standard OpenAI is never sent the vendor field.
+			opts = append(opts, openai.WithSuppressThinking())
 		}
 		return openai.NewProvider(c.APIKey, c.Model, opts...), nil
 	case "anthropic":
@@ -90,6 +103,9 @@ func (c GatewayConfig) Build() (llm.Provider, error) {
 		}
 		if c.Debug {
 			opts = append(opts, anthropic.WithMiddleware(debugMiddleware(os.Stdout)))
+		}
+		if c.rawObs != nil {
+			opts = append(opts, anthropic.WithMiddleware(rawObsMiddleware(c.rawObs)))
 		}
 		if c.Reasoning != "" {
 			opts = append(opts, anthropic.WithReasoningEffort(c.Reasoning))
@@ -167,6 +183,13 @@ func (g *mutableGateway) reconfigure(mutate func(*GatewayConfig)) error {
 	return err
 }
 
+// setRawObs installs the raw-observability sink and rebuilds the provider so the
+// raw-LLM middleware takes effect. A build error (e.g. no key yet) is ignored —
+// the sink persists in the config and applies once the gateway becomes usable.
+func (g *mutableGateway) setRawObs(sink func([]byte)) {
+	_ = g.reconfigure(func(c *GatewayConfig) { c.rawObs = sink })
+}
+
 // status returns a snapshot of the current config and whether it is usable.
 func (g *mutableGateway) status() (GatewayConfig, bool) {
 	g.mu.RLock()
@@ -238,6 +261,35 @@ func debugMiddleware(out io.Writer) llm.HTTPMiddleware {
 		}
 		if resp != nil {
 			fmt.Fprintf(out, "\033[2m<- %s\033[0m\n", resp.Status)
+		}
+		return resp, err
+	}
+}
+
+// rawObsMiddleware mirrors the raw LLM request body and response status to an
+// observability sink (no auth headers — they carry the API key, same redaction
+// as debugMiddleware). Fire-and-forget: the sink drops it if nobody is watching
+// (sys.obs.<id>.raw). The body is restored untouched so streaming still works.
+func rawObsMiddleware(emit func([]byte)) llm.HTTPMiddleware {
+	return func(req *http.Request, next func(*http.Request) (*http.Response, error)) (*http.Response, error) {
+		if req.Body != nil {
+			body, err := io.ReadAll(req.Body)
+			_ = req.Body.Close()
+			if err == nil {
+				req.Body = io.NopCloser(bytes.NewReader(body))
+				req.ContentLength = int64(len(body))
+				emit([]byte(fmt.Sprintf("-> %s %s\n%s", req.Method, req.URL, prettyJSON(body))))
+			}
+		} else {
+			emit([]byte(fmt.Sprintf("-> %s %s", req.Method, req.URL)))
+		}
+		resp, err := next(req)
+		if err != nil {
+			emit([]byte(fmt.Sprintf("<- transport error: %v", err)))
+			return resp, err
+		}
+		if resp != nil {
+			emit([]byte("<- " + resp.Status))
 		}
 		return resp, err
 	}

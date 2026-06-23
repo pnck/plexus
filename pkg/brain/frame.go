@@ -26,6 +26,9 @@ type Frame struct {
 	ToolCalls []llm.ToolCall
 	// ToolCallID links a tool-result frame back to the call it answers.
 	ToolCallID string
+	// Reasoning holds opaque, signed thinking blocks to replay on this assistant
+	// tool-call turn (Anthropic extended thinking). Never rendered as context.
+	Reasoning []llm.ReasoningBlock
 }
 
 // stampAuthority maps an inbound message's source channel to its authority layer
@@ -118,6 +121,7 @@ func compose(history []Frame) []llm.Message {
 			Content:    f.Content,
 			ToolCalls:  f.ToolCalls,
 			ToolCallID: f.ToolCallID,
+			Reasoning:  f.Reasoning,
 		}
 		if f.Role == llm.RoleUser {
 			if label := authorityLabel(f.Authority); label != "" {

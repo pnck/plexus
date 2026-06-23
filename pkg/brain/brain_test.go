@@ -262,10 +262,20 @@ func TestDelegationOutOfEnvelopeFedBack(t *testing.T) {
 		},
 	}
 
-	ch := spawnDelegation(context.Background(), gw, caps, Briefing{Objective: "try to exec"}, defaultDelegationMaxTurns)
+	var trace []string
+	observe := func(s string) { trace = append(trace, s) }
+	ch := spawnDelegation(context.Background(), gw, caps, Briefing{Objective: "try to exec"}, defaultDelegationMaxTurns, observe)
 	r := <-ch
 	if !strings.Contains(r.OpenQuestions, "not permitted") {
 		t.Fatalf("delegation did not report the out-of-envelope denial: %+v", r)
+	}
+	// The observer (the brain's deleg-obs tap) saw the sub-cognition transcript:
+	// the objective, the attempted call, and the denial fed back.
+	joined := strings.Join(trace, "\n")
+	if !strings.Contains(joined, "objective: try to exec") ||
+		!strings.Contains(joined, "call run_command") ||
+		!strings.Contains(joined, "result") {
+		t.Fatalf("delegation transcript not observed: %q", trace)
 	}
 	// Inspect the recorded delegation messages: the denial must have been fed back
 	// as a tool message before the delegation converged.

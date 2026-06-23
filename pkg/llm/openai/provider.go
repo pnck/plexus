@@ -18,13 +18,18 @@ type Provider struct {
 	client          *openai.Client
 	model           string
 	reasoningEffort string // "" | low | medium | high (o-series only)
+	// suppressThinking sends enable_thinking:false on each request — a best-effort
+	// way to turn OFF thinking on compatible gateways that think by default
+	// (Qwen/DashScope). Endpoints that don't know the field ignore it.
+	suppressThinking bool
 }
 
 // opts holds optional configuration for the provider constructor.
 type opts struct {
-	baseURL         string
-	middleware      []llm.HTTPMiddleware
-	reasoningEffort string
+	baseURL          string
+	middleware       []llm.HTTPMiddleware
+	reasoningEffort  string
+	suppressThinking bool
 }
 
 // Option configures the provider via the functional-option pattern.
@@ -49,6 +54,17 @@ func WithMiddleware(mw llm.HTTPMiddleware) Option {
 func WithReasoningEffort(level string) Option {
 	return func(o *opts) {
 		o.reasoningEffort = level
+	}
+}
+
+// WithSuppressThinking makes each request carry enable_thinking:false, a
+// best-effort opt-out for compatible gateways (Qwen/DashScope) that emit
+// thinking by default. Standard OpenAI does not think-by-default, so callers
+// should only set this for non-default endpoints (the chat gateway gates it on a
+// custom base URL). Unknown-field-tolerant endpoints simply ignore it.
+func WithSuppressThinking() Option {
+	return func(o *opts) {
+		o.suppressThinking = true
 	}
 }
 
@@ -83,9 +99,10 @@ func NewProvider(apiKey, model string, options ...Option) *Provider {
 
 	client := openai.NewClient(reqOpts...)
 	return &Provider{
-		client:          &client,
-		model:           model,
-		reasoningEffort: o.reasoningEffort,
+		client:           &client,
+		model:            model,
+		reasoningEffort:  o.reasoningEffort,
+		suppressThinking: o.suppressThinking,
 	}
 }
 
@@ -136,8 +153,15 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 		params.ReasoningEffort = shared.ReasoningEffort(e)
 	}
 
+	// Best-effort thinking opt-out for gateways that think by default. Sent as an
+	// extra body field (not a typed param) since it is a vendor extension.
+	var reqOpts []option.RequestOption
+	if p.suppressThinking {
+		reqOpts = append(reqOpts, option.WithJSONSet("enable_thinking", false))
+	}
+
 	// Initiate the stream
-	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
+	stream := p.client.Chat.Completions.NewStreaming(ctx, params, reqOpts...)
 
 	return &openaiStream{stream: stream}, nil
 }
