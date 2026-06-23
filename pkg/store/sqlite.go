@@ -22,8 +22,10 @@ import (
 //   - foreign_keys(ON)       — enforce referential integrity where declared.
 //   - synchronous(NORMAL)    — the WAL-recommended durability/throughput point.
 //
-// Pass ":memory:" for an ephemeral database (tests). Because each of the four
-// §5.7.9 stores owns its own database, callers Open one handle per store.
+// Pass ":memory:" for an ephemeral database (tests). Each store is table-scoped
+// (New*Store only creates its own table), so several stores may share one *sql.DB
+// — the brain-private Checkpoint and WorkingMemory stores do exactly that (§5.7.9
+// revised). TranscriptArchive, being droppable/rotatable, is opened separately.
 func Open(path string) (*sql.DB, error) {
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)",

@@ -67,8 +67,9 @@ type Message struct {
 	// TaskID is the unit of work this message pertains to (concrete, agent-level).
 	// It replaces the old "node_id": a DAG node is an Inspark-domain mapping with no
 	// concrete meaning to the standalone agent SDK; the agent only knows "a task".
-	TaskID    string `json:"task_id"`
-	SessionID string `json:"session_id"` // the session
+	// There is NO session concept in plexus — a conversation thread is a control-
+	// plane/frontend grouping, not an agent concern (same category as "project", D1).
+	TaskID string `json:"task_id"`
 	// TraceID follows ONE causal chain (ask → … → answer) across messages/hops for
 	// observability/audit — distinct from TaskID, which groups a work unit's messages.
 	TraceID string `json:"trace_id"`

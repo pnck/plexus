@@ -71,7 +71,7 @@ func TestTaskReportUsesCurrentTask(t *testing.T) {
 	}}
 
 	b := New(Options{Gateway: gw, Emitter: em, Inbound: directInbound{}})
-	msg := protocol.Message{Type: protocol.TypeP2P, Sender: "vp", TaskID: "CUR-1", Payload: []byte("do the thing")}
+	msg := protocol.Message{Type: protocol.TypeP2P, Sender: "user", TaskID: "CUR-1", Payload: []byte("do the thing")}
 	if _, err := b.Handle(context.Background(), msg); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

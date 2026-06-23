@@ -70,10 +70,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE INDEX IF NOT EXISTS idx_checkpoints_wait_for ON checkpoints (wait_for) WHERE wait_for <> '';
 `
 
-// CheckpointStore persists the checkpoint chain (§5.7.9). It wraps one *sql.DB
-// dedicated to checkpoints — it does not share a database with the other
-// state/memory stores. The single table is keyed (task_id, seq); Status/Result/
-// WaitFor update in place.
+// CheckpointStore persists the checkpoint chain (§5.7.9). It is table-scoped —
+// it owns the `checkpoints` table, not the database — so it may share a *sql.DB
+// with other brain-private stores (WorkingMemory does). The table is keyed
+// (task_id, seq); Status/Result/WaitFor update in place.
 type CheckpointStore struct {
 	db *sql.DB
 }

@@ -49,8 +49,9 @@ CREATE TABLE IF NOT EXISTS working_memory (
 );
 `
 
-// WorkingMemoryStore persists WorkingMemory (§5.7.9). It wraps its own *sql.DB —
-// not shared with the other state/memory stores. Notes are recall-on-demand:
+// WorkingMemoryStore persists WorkingMemory (§5.7.9). It is table-scoped (owns
+// the `working_memory` table), so it shares the brain-private *sql.DB with
+// CheckpointStore rather than opening its own. Notes are recall-on-demand:
 // nothing here reaches the LLM until the agent explicitly reads it.
 type WorkingMemoryStore struct {
 	db *sql.DB

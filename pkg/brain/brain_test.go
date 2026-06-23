@@ -102,7 +102,7 @@ type directInbound struct{ msg protocol.Message }
 func (d directInbound) Recv(context.Context) (protocol.Message, error) { return d.msg, nil }
 
 func userMsg(text string) protocol.Message {
-	return protocol.Message{Type: protocol.TypeP2P, Sender: "vp", Payload: []byte(text)}
+	return protocol.Message{Type: protocol.TypeP2P, Sender: "user", Payload: []byte(text)}
 }
 
 // recordingEffector tracks invocation and returns a fixed result.
@@ -292,7 +292,7 @@ func TestAuthorityStamping(t *testing.T) {
 		msg  protocol.Message
 		want protocol.Authority
 	}{
-		{"vp p2p -> L2 user", protocol.Message{Type: protocol.TypeP2P, Sender: "vp"}, protocol.AuthUser},
+		{"user p2p -> L2 user", protocol.Message{Type: protocol.TypeP2P, Sender: "user"}, protocol.AuthUser},
 		{"relay report -> L4 control", protocol.Message{Type: protocol.TypeReport, Sender: "agent-x"}, protocol.AuthControl},
 		{"explicit tool -> L3", protocol.Message{Type: protocol.TypeP2P, Authority: protocol.AuthTool}, protocol.AuthTool},
 		{"explicit memory -> L5", protocol.Message{Type: protocol.TypeP2P, Authority: protocol.AuthMemory}, protocol.AuthMemory},

@@ -35,7 +35,7 @@ type Frame struct {
 // instructions. If the envelope already carries an explicit Authority, it is
 // honored; otherwise the layer is inferred from the message type.
 //
-//   - VP/human prompt            -> L2 AuthUser
+//   - human user prompt          -> L2 AuthUser
 //   - tool/effector result       -> L3 AuthTool
 //   - other agent via relay      -> L4 AuthControl
 //   - recalled memory            -> L5 AuthMemory
@@ -49,7 +49,7 @@ func stampAuthority(m protocol.Message) protocol.Authority {
 		// instructions: L4.
 		return protocol.AuthControl
 	case protocol.TypeP2P:
-		// A direct message from the VP/human is the real instruction source: L2.
+		// A direct message from the human user is the real instruction source: L2.
 		return protocol.AuthUser
 	default:
 		return protocol.AuthUser
