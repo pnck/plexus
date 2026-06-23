@@ -69,21 +69,6 @@ func (h *Host) runCtrl(ctx context.Context, cmd, arg string) string {
 		return h.listSteps(ctx)
 	case cmdMemory:
 		return h.listMemory(ctx)
-	case cmdTrace:
-		switch arg {
-		case "on":
-			h.traceOn.Store(true)
-			return "trace on — tool/delegation calls will be shown"
-		case "off":
-			h.traceOn.Store(false)
-			return "trace off"
-		default:
-			state := "off"
-			if h.traceOn.Load() {
-				state = "on"
-			}
-			return fmt.Sprintf("usage: /trace on|off (currently %s)", state)
-		}
 	default:
 		return fmt.Sprintf("unknown control command %q", cmd)
 	}

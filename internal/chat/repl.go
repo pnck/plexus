@@ -2,11 +2,13 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/chzyer/readline"
+	"github.com/nats-io/nats.go"
 	"plexus/protocol"
 	"plexus/server"
 )
@@ -17,11 +19,14 @@ import (
 // answer any approval inline, return to the prompt — mirroring the old direct
 // REPL's feel while everything now rides the mesh.
 type client struct {
-	srv     *server.Server
-	agentID string
-	rl      *readline.Instance
-	frames  chan inFrame
-	turn    int
+	srv       *server.Server
+	nc        *nats.Conn // for subscribing to the agent's observability streams
+	agentID   string
+	obsPrefix string // the agent's ObserveSubject prefix (e.g. "sys.obs.")
+	rl        *readline.Instance
+	frames    chan inFrame
+	turn      int
+	obsSub    *nats.Subscription // non-nil while /trace is on
 }
 
 // inFrame is a decoded agent frame plus the message's correlation id (needed to
@@ -43,7 +48,6 @@ var hostCommands = map[string]string{
 	"/key": cmdKey, "/provider": cmdProvider, "/model": cmdModel, "/models": cmdModels,
 	"/system": cmdSystem, "/debug": cmdDebug, "/status": cmdStatus, "/tools": cmdTools,
 	"/steps": cmdSteps, "/memory": cmdMemory, "/reset": cmdReset,
-	"/trace": cmdTrace, "/verbose": cmdTrace, // /verbose is an alias for /trace
 }
 
 // onReport decodes an agent frame and queues it for the active receive phase.
@@ -83,6 +87,8 @@ func (c *client) run(ctx context.Context) error {
 				return nil
 			case "/help", "/?":
 				c.printHelp(out)
+			case "/trace", "/verbose":
+				c.trace(out, arg)
 			case "/approve", "/deny":
 				fmt.Fprintln(out, "(no pending approval)")
 			default:
@@ -107,6 +113,49 @@ func (c *client) say(ctx context.Context, text string) {
 		return
 	}
 	c.receive(ctx)
+}
+
+// trace toggles a subscription to the agent's observability streams
+// (sys.obs.<id>.>). The streams are always emitted by the agent; we only
+// subscribe while /trace is on, so there is no client-side cost when off.
+func (c *client) trace(out io.Writer, arg string) {
+	on := c.obsSub != nil
+	switch arg {
+	case "", "on":
+		if on {
+			fmt.Fprintln(out, "(trace already on)")
+			return
+		}
+		sub, err := c.nc.Subscribe(c.obsPrefix+c.agentID+".>", c.onObs)
+		if err != nil {
+			fmt.Fprintf(out, "(trace subscribe failed: %v)\n", err)
+			return
+		}
+		c.obsSub = sub
+		fmt.Fprintln(out, "trace on — tool/delegation calls will be shown")
+	case "off":
+		if on {
+			_ = c.obsSub.Unsubscribe()
+			c.obsSub = nil
+		}
+		fmt.Fprintln(out, "trace off")
+	default:
+		fmt.Fprintln(out, "usage: /trace on|off")
+	}
+}
+
+// onObs receives an observability event and funnels it into the frame stream so
+// the single display goroutine renders it in order (runs on a NATS goroutine).
+func (c *client) onObs(m *nats.Msg) {
+	var msg protocol.Message
+	if err := json.Unmarshal(m.Data, &msg); err != nil {
+		return
+	}
+	kind := m.Subject[strings.LastIndexByte(m.Subject, '.')+1:] // trailing token (trace/raw/…)
+	select {
+	case c.frames <- inFrame{f: Frame{Kind: kindTrace, Cmd: kind, Text: string(msg.Payload)}}:
+	default: // drop under backpressure — a debug stream, never block the dispatcher
+	}
 }
 
 // control sends a control command and prints its single result.
@@ -151,8 +200,8 @@ func (c *client) receive(ctx context.Context) {
 			case kindUsage:
 				usage = in.f.Text
 			case kindTrace:
-				// dim trace line: · tool(args) → result
-				fmt.Fprintf(out, "\033[2m· %s(%s) → %s\033[0m\n", in.f.Cmd, in.f.Arg, in.f.Text)
+				// dim observability line from the obs stream (Text is preformatted).
+				fmt.Fprintf(out, "\033[2m· %s\033[0m\n", in.f.Text)
 			case kindApproval:
 				c.approval(ctx, in.corr, in.f.Text)
 			case kindError:

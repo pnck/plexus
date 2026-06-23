@@ -53,7 +53,6 @@ type Host struct {
 	reportSubject string
 	corr          atomic.Uint64
 	curCorr       atomic.Value // string: correlation id of the turn the worker is on
-	traceOn       atomic.Bool  // /trace: emit tool/delegation trace frames
 }
 
 // NewHost assembles a chat agent and binds it to a mesh node under agentID. cfg
@@ -81,18 +80,13 @@ func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.O
 	cfg.OnUsage = func(u llm.Usage) {
 		h.send(context.Background(), h.turnCorr(), Frame{Kind: kindUsage, Text: usageLine(u)})
 	}
-	// Tool/delegation trace — observability, off by default, gated by /trace so no
-	// bus traffic (and no possibly-large tool output) flows unless asked for.
+	// Tool/delegation trace — observability over the bus, on the dedicated obs
+	// subject (sys.obs.<id>.trace), OFF the functional report channel. Fire-and-
+	// forget: with no subscriber NATS drops it. Consumers subscribe by wildcard
+	// (chat /trace, or `plexus watch`).
 	cfg.OnTool = func(name, args, result string) {
-		if !h.traceOn.Load() {
-			return
-		}
-		h.send(context.Background(), h.turnCorr(), Frame{
-			Kind: kindTrace,
-			Cmd:  name,
-			Arg:  preview(args, 200),
-			Text: preview(result, 600),
-		})
+		line := fmt.Sprintf("%s(%s) → %s", name, preview(args, 200), preview(result, 600))
+		_ = h.node.Observe(context.Background(), "trace", []byte(line))
 	}
 
 	opts := append([]mesh.Option{mesh.WithOnMessage(h.onMessage)}, nodeOpts...)
@@ -191,6 +185,10 @@ func (h *Host) send(ctx context.Context, corr string, f Frame) {
 		slog.Error("chat: failed to send frame", "err", err)
 	}
 }
+
+// ObserveSubject returns the node's observability subject prefix, so the client
+// can subscribe to this agent's obs streams (sys.obs.<id>.>).
+func (h *Host) ObserveSubject() string { return h.node.Options.ObserveSubject }
 
 // Close releases the agent's resources.
 func (h *Host) Close() error { return h.agent.Close() }

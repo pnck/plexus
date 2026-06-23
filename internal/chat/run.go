@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+	"github.com/nats-io/nats.go"
 	"plexus/pkg/brain"
 	"plexus/pkg/llm"
 	"plexus/pkg/mesh"
@@ -64,12 +65,20 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 	}
 	defer func() { _ = rl.Close() }()
 
-	c := &client{agentID: agentID, rl: rl, frames: make(chan inFrame, 64)}
+	// One shared NATS connection: the control plane uses it (injected), and the
+	// client uses it directly to subscribe to the agent's observability streams.
+	nc, err := nats.Connect(url)
+	if err != nil {
+		return fmt.Errorf("chat: connect NATS: %w", err)
+	}
+	defer nc.Close()
+
+	c := &client{agentID: agentID, nc: nc, rl: rl, frames: make(chan inFrame, 64)}
 
 	// Control plane + client first, given a moment to subscribe before the agent
 	// registers (core NATS one-shot registration would otherwise be lost; durable
 	// registration is E1.2).
-	srv := server.New(server.WithNatsURL(url), server.WithOnReport(c.onReport))
+	srv := server.New(server.WithNATSConn(nc), server.WithOnReport(c.onReport))
 	c.srv = srv
 	go func() { _ = srv.Run(ctx) }()
 	select {
@@ -89,6 +98,7 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 		return err
 	}
 	defer func() { _ = h.Close() }()
+	c.obsPrefix = h.ObserveSubject()
 	go func() { _ = h.Run(ctx) }()
 
 	if err := waitRegistered(ctx, srv, agentID, 5*time.Second); err != nil {

@@ -2,12 +2,14 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"plexus/pkg/llm"
 	"plexus/pkg/mesh"
 	"plexus/protocol"
@@ -33,6 +35,7 @@ type busFixture struct {
 	frames  chan inFrame
 	agentID string
 	host    *Host
+	url     string
 }
 
 func startBus(t *testing.T, gw llm.Provider, opts ...func(*Config)) *busFixture {
@@ -48,7 +51,7 @@ func startBus(t *testing.T, gw llm.Provider, opts ...func(*Config)) *busFixture 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	fx := &busFixture{frames: make(chan inFrame, 64), agentID: "chat-agent"}
+	fx := &busFixture{frames: make(chan inFrame, 64), agentID: "chat-agent", url: url}
 	fx.srv = server.New(server.WithNatsURL(url), server.WithOnReport(func(m protocol.Message) {
 		if f, ok := decodeFrame(m.Payload); ok {
 			fx.frames <- inFrame{f: f, corr: m.CorrelationID}
@@ -250,36 +253,52 @@ func TestBusControlReset(t *testing.T) {
 	}
 }
 
-// /trace gates tool/delegation observability: off by default (no trace frames),
-// on after /trace on.
-func TestBusTrace(t *testing.T) {
-	// turn calls a step_add effector, then converges.
-	mk := func() *fakeGateway {
-		return &fakeGateway{turns: []scriptedTurn{
-			{calls: []llm.ToolCall{{ID: "s1", Name: "step_add", Arguments: `{"goal":"plan"}`}}},
-			{text: "noted"},
-		}}
-	}
+// Tool/delegation trace is published to the observability subject
+// (sys.obs.<id>.trace), OFF the functional report channel. A wildcard subscriber
+// (as `plexus watch` or chat /trace does) sees every tool call; the report
+// channel carries no trace.
+func TestBusTraceOnObsSubject(t *testing.T) {
+	gw := &fakeGateway{turns: []scriptedTurn{
+		{calls: []llm.ToolCall{{ID: "s1", Name: "step_add", Arguments: `{"goal":"plan"}`}}},
+		{text: "noted"},
+	}}
+	fx := startBus(t, gw)
 
-	// Default OFF: collect the whole turn, assert no trace frame.
-	fx := startBus(t, mk())
+	// Subscribe to the obs stream like a watcher would.
+	nc, err := nats.Connect(fx.url)
+	if err != nil {
+		t.Fatalf("nats connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	obs := make(chan string, 16)
+	sub, err := nc.Subscribe("sys.obs."+fx.agentID+".>", func(m *nats.Msg) {
+		var msg protocol.Message
+		if json.Unmarshal(m.Data, &msg) == nil {
+			obs <- m.Subject + " | " + string(msg.Payload)
+		}
+	})
+	if err != nil {
+		t.Fatalf("obs subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	time.Sleep(100 * time.Millisecond) // let the subscription register
+
 	fx.say(t, "t1", "make a plan")
+
+	// The functional report stream carries the reply but NO trace.
 	for _, in := range fx.collectUntil(t, kindReply) {
 		if in.f.Kind == kindTrace {
-			t.Fatalf("trace frame emitted while /trace is off: %+v", in.f)
+			t.Fatalf("trace leaked onto the report channel: %+v", in.f)
 		}
 	}
-
-	// Turn ON, then a turn must emit a trace frame naming the tool.
-	fx2 := startBus(t, mk())
-	fx2.ctrl(t, "c1", cmdTrace, "on")
-	if r := fx2.await(t, kindCtrl); !strings.Contains(r.f.Text, "trace on") {
-		t.Fatalf("/trace on = %q", r.f.Text)
-	}
-	fx2.say(t, "t1", "make a plan")
-	tr := find(t, fx2.collectUntil(t, kindReply), kindTrace)
-	if tr.f.Cmd != "step_add" || !strings.Contains(tr.f.Text, "added step #0") {
-		t.Fatalf("trace = {cmd:%q text:%q}, want step_add → added step #0", tr.f.Cmd, tr.f.Text)
+	// The obs stream carries the tool trace.
+	select {
+	case line := <-obs:
+		if !strings.Contains(line, "sys.obs.chat-agent.trace") || !strings.Contains(line, "step_add") || !strings.Contains(line, "added step #0") {
+			t.Fatalf("obs trace = %q, want sys.obs…trace step_add → added step #0", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no trace on the obs subject")
 	}
 }
 

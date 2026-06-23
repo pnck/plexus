@@ -214,6 +214,22 @@ func (a *Node) SendMessage(ctx context.Context, target string, payload []byte) e
 	return a.SendRaw(ctx, topic, msg)
 }
 
+// Observe publishes an observability event to ObserveSubject+<id>+"."+kind (e.g.
+// sys.obs.chat-agent.trace). It is fire-and-forget over core NATS: with no
+// subscriber the message is simply discarded by the broker, so emitting costs a
+// marshal + a local publish and nothing downstream. Debug consumers (a chat
+// /trace subscription, or `plexus watch`) subscribe by wildcard when they want
+// it. kind is e.g. "trace" / "raw" / "log" / "deleg".
+func (a *Node) Observe(ctx context.Context, kind string, content []byte) error {
+	msg := protocol.Message{
+		ID:        fmt.Sprintf("obs-%d", time.Now().UnixNano()),
+		Sender:    a.ID,
+		Payload:   content,
+		Timestamp: time.Now().Unix(),
+	}
+	return a.SendRaw(ctx, a.Options.ObserveSubject+a.ID+"."+kind, msg)
+}
+
 // SendRaw marshals a Message and publishes it to a raw NATS subject
 func (a *Node) SendRaw(ctx context.Context, subject string, msg protocol.Message) error {
 	if err := ctx.Err(); err != nil {

@@ -48,7 +48,6 @@ const (
 	cmdTools    = "tools"
 	cmdSteps    = "steps"
 	cmdMemory   = "memory"
-	cmdTrace    = "trace"
 )
 
 func encodeFrame(f Frame) []byte {

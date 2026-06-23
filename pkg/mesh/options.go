@@ -16,8 +16,13 @@ type Options struct {
 	QueuePrefix     string
 	RegisterSubject string
 	ReportSubject   string
-	PingInterval    time.Duration
-	OnMessage       func(protocol.Message) // Callback for async message handling
+	// ObserveSubject is the prefix for observability streams (trace / raw / log /
+	// delegation transcripts). A node publishes to ObserveSubject+<id>+"."+<kind>,
+	// kept OFF the functional report channel so debug consumers subscribe by
+	// wildcard (e.g. sys.obs.>) without touching sys.report.
+	ObserveSubject string
+	PingInterval   time.Duration
+	OnMessage      func(protocol.Message) // Callback for async message handling
 }
 
 // Option is a functional option pattern
@@ -33,6 +38,7 @@ func DefaultOptions() Options {
 		QueuePrefix:     "group.queue.",
 		RegisterSubject: "sys.register",
 		ReportSubject:   "sys.report",
+		ObserveSubject:  "sys.obs.",
 		PingInterval:    5 * time.Second,
 		OnMessage:       nil,
 	}
