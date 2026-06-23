@@ -3,12 +3,42 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"plexus/pkg/effector"
 	"plexus/pkg/llm"
+	"plexus/pkg/store"
 	"plexus/protocol"
 )
+
+// YieldError is returned by Handle/Resume when the cognitive loop suspended a step
+// awaiting an external answer (the durable Yield-for-Approval of §5.7.5). The
+// caller (the bus host) emits the ask tagged with Corr, parks, and later calls
+// Resume(corr, granted) when the answer arrives over the durable inbox. It is a
+// control signal, not a failure — the synchronous Approver path never produces it.
+type YieldError struct {
+	Corr        string // CorrelationID the suspended step waits on (answer pairs back on it)
+	Description string // human-facing ask (e.g. "run_command wants to run: …")
+	TaskID      string // the task whose step is suspended
+}
+
+func (e *YieldError) Error() string {
+	return fmt.Sprintf("brain yielded on task %s awaiting answer %s", e.TaskID, e.Corr)
+}
+
+// pendingYield captures the in-memory turn state a live brain needs to resume a
+// suspended step precisely (run the gated call, then the rest of the turn). It is
+// lost when the process dies — a fresh brain instead rebuilds from the persisted
+// step chain (resumeFromCheckpoints), per §5.7.9 ("rebuild from the step chain,
+// never by replaying history").
+type pendingYield struct {
+	corr   string
+	taskID string
+	calls  []llm.ToolCall // the assistant turn's full tool-call list
+	idx    int            // the gated call we suspended at
+}
 
 // Approver is the Yield-for-Approval seam (§5.4.3 / §5.7.4). Before running an
 // effector the policy marks approval-required, the brain calls RequestApproval.
@@ -57,6 +87,16 @@ type Brain struct {
 	onDelegTrace       func(string)                    // optional: a spawned delegation's transcript lines (observability)
 	maxTurns           int                             // cognitive-loop bound (runaway-model guard)
 	delegationMaxTurns int                             // bound passed to each spawned delegation's loop
+
+	// Durable yield/resume (§5.7.5). When yieldForApproval is set (the bus host
+	// enables it), a gated effector suspends a checkpoint and returns a YieldError
+	// instead of blocking on the Approver — so the wait survives process death and
+	// resumes from the persisted step chain. checkpoints is the store the brain
+	// suspends/activates on; newCorrID mints the correlation id a yield waits on.
+	checkpoints      *store.CheckpointStore
+	yieldForApproval bool
+	newCorrID        func() string
+	pending          *pendingYield // in-memory state for a precise (live) resume; nil after death
 }
 
 // Default loop bounds applied in New() when the corresponding Options field is 0.
@@ -83,6 +123,19 @@ type Options struct {
 	// DelegationMaxTurns bounds each spawned delegation's lean LLM<->tools loop.
 	// Defaults to 16 when 0.
 	DelegationMaxTurns int
+	// Checkpoints is the brain-private step store (§5.7.9). Required for durable
+	// yield/resume; when set together with YieldForApproval, a gated effector
+	// suspends a step rather than blocking the Approver.
+	Checkpoints *store.CheckpointStore
+	// YieldForApproval switches the approval mechanism from the synchronous
+	// Approver (blocks the loop) to durable yield: the brain suspends a checkpoint
+	// and returns a *YieldError, to be woken by Resume when the answer arrives over
+	// the durable inbox. Requires Checkpoints. The in-process Agent and unit tests
+	// leave it false and keep the Approver path.
+	YieldForApproval bool
+	// NewCorrID mints the correlation id a yield waits on (injected to avoid a
+	// time/random dependency). Defaults to a monotonic counter when nil.
+	NewCorrID func() string
 	// OnDelta, if set, receives streamed assistant-text chunks as they arrive
 	// during the cognitive loop (live display). Called on the loop's goroutine.
 	OnDelta func(string)
@@ -128,6 +181,11 @@ func New(opt Options) *Brain {
 	if emitter == nil {
 		emitter = NopEmitter{}
 	}
+	newCorrID := opt.NewCorrID
+	if newCorrID == nil {
+		var n int
+		newCorrID = func() string { n++; return fmt.Sprintf("yield-%d", n) }
+	}
 	b := &Brain{
 		gateway:            opt.Gateway,
 		reg:                opt.Registry,
@@ -142,6 +200,9 @@ func New(opt Options) *Brain {
 		onDelegTrace:       opt.OnDelegTrace,
 		maxTurns:           maxTurns,
 		delegationMaxTurns: delegationMaxTurns,
+		checkpoints:        opt.Checkpoints,
+		yieldForApproval:   opt.YieldForApproval && opt.Checkpoints != nil,
+		newCorrID:          newCorrID,
 	}
 	b.seed()
 	return b
@@ -256,31 +317,232 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 			ToolCalls:  calls,
 			Reasoning:  reasoning,
 		})
-		// Dispatch each call, absorbing the result as an L3/L4 frame. Effectors run
-		// under the current task's scope (§5.7.10) so task-scoped tools — working
-		// memory and the step_* checkpoint primitives — address the right task.
-		dctx := effector.WithTaskScope(ctx, b.currentTask)
-		for _, call := range calls {
-			if b.onToolStart != nil {
-				b.onToolStart(call.Name, call.Arguments)
-			}
-			content := b.dispatch(dctx, call)
-			if b.onTool != nil {
-				b.onTool(call.Name, call.Arguments, content)
-			}
-			b.history = append(b.history, Frame{
-				Authority:  protocol.AuthTool, // ⑥ tool/delegation results are L3 data
-				Provenance: call.Name,
-				Role:       llm.RoleTool,
-				Content:    content,
-				ToolCallID: call.ID,
-			})
+		// Dispatch the turn's calls. In yield mode a gated call suspends a step and
+		// returns a *YieldError up to the caller (the loop unwinds; Resume continues
+		// it later); otherwise the loop re-composes and continues.
+		if ye := b.runCalls(ctx, calls, 0); ye != nil {
+			return "", ye
 		}
 		// ⑦ §5.7.9: nothing to checkpoint here — the step plan persists via the
 		// step_* tools (CheckpointStore); history is the droppable working
 		// transcript. The loop re-composes and continues.
 	}
 	return "", fmt.Errorf("brain hit max turns (%d) without converging", b.maxTurns)
+}
+
+// runCalls dispatches calls[start:], absorbing each result as an L3 tool frame.
+// Effectors run under the current task's scope (§5.7.10) so task-scoped tools —
+// working memory and the step_* checkpoint primitives — address the right task.
+// In yield mode, a gated effector call suspends a checkpoint (WaitFor = a fresh
+// correlation id), stashes the turn's remaining state for a precise live resume,
+// and returns a *YieldError — the durable Yield-for-Approval point (§5.7.5).
+func (b *Brain) runCalls(ctx context.Context, calls []llm.ToolCall, start int) *YieldError {
+	dctx := effector.WithTaskScope(ctx, b.currentTask)
+	for i := start; i < len(calls); i++ {
+		call := calls[i]
+		if b.yieldForApproval && b.needsApproval(call) {
+			ye, err := b.suspendForApproval(ctx, calls, i)
+			if err != nil {
+				// Could not persist the suspension — fail the call back to the model
+				// rather than silently dropping the gate.
+				b.absorbToolResult(call, fmt.Sprintf("approval could not be requested: %v", err))
+				continue
+			}
+			return ye
+		}
+		if b.onToolStart != nil {
+			b.onToolStart(call.Name, call.Arguments)
+		}
+		content := b.dispatch(dctx, call)
+		if b.onTool != nil {
+			b.onTool(call.Name, call.Arguments, content)
+		}
+		b.absorbToolResult(call, content)
+	}
+	return nil
+}
+
+// needsApproval reports whether a call routes to an approval-gated effector. The
+// delegate and task_* tools are brain-owned and never gated here.
+func (b *Brain) needsApproval(call llm.ToolCall) bool {
+	switch call.Name {
+	case DelegateToolName, taskReportToolName, taskRevertToolName:
+		return false
+	default:
+		return b.reg != nil && b.reg.RequiresApproval(call.Name)
+	}
+}
+
+// suspendForApproval persists the yield: it ensures the current task has an Active
+// step, suspends it on a fresh correlation id, stashes the turn state for a live
+// resume, and returns the YieldError describing the ask.
+func (b *Brain) suspendForApproval(ctx context.Context, calls []llm.ToolCall, idx int) (*YieldError, error) {
+	call := calls[idx]
+	corr := b.newCorrID()
+	seq, err := b.ensureActiveStep(ctx, "awaiting approval: "+call.Name)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.checkpoints.Suspend(ctx, b.currentTask, seq, corr); err != nil {
+		return nil, err
+	}
+	b.pending = &pendingYield{corr: corr, taskID: b.currentTask, calls: calls, idx: idx}
+	return &YieldError{
+		Corr:        corr,
+		Description: approvalDescription(call),
+		TaskID:      b.currentTask,
+	}, nil
+}
+
+// ensureActiveStep returns the seq of the current task's Active step, creating one
+// (Append + Activate) with the given goal if none is active yet — so a yield
+// always has a concrete step to suspend even when the model has not planned steps.
+func (b *Brain) ensureActiveStep(ctx context.Context, goal string) (int64, error) {
+	if cp, ok, err := b.checkpoints.Active(ctx, b.currentTask); err != nil {
+		return 0, err
+	} else if ok {
+		return cp.Seq, nil
+	}
+	cp, err := b.checkpoints.Append(ctx, b.currentTask, goal)
+	if err != nil {
+		return 0, err
+	}
+	if err := b.checkpoints.Activate(ctx, b.currentTask, cp.Seq); err != nil {
+		return 0, err
+	}
+	return cp.Seq, nil
+}
+
+// absorbToolResult appends a tool/delegation result to history as an L3 data frame
+// (⑥ tool results are L3, never instructions).
+func (b *Brain) absorbToolResult(call llm.ToolCall, content string) {
+	b.history = append(b.history, Frame{
+		Authority:  protocol.AuthTool,
+		Provenance: call.Name,
+		Role:       llm.RoleTool,
+		Content:    content,
+		ToolCallID: call.ID,
+	})
+}
+
+// approvalDescription renders the human-facing ask for a gated call.
+func approvalDescription(call llm.ToolCall) string {
+	return fmt.Sprintf("%s wants to run: %s", call.Name, call.Arguments)
+}
+
+// Resume wakes a step suspended by a yield (§5.7.5): it activates the checkpoint(s)
+// waiting on corr and continues the cognitive loop. A live brain (the same process
+// that suspended) resumes precisely — it runs the gated call with the granted/denied
+// decision and finishes the turn. A fresh brain (the suspending process died; this
+// one has only seed history) instead rebuilds working context from the persisted
+// step chain and re-enters, per §5.7.9. Resume may itself yield again.
+func (b *Brain) Resume(ctx context.Context, corr string, granted bool) (string, error) {
+	if b.checkpoints == nil {
+		return "", fmt.Errorf("brain has no checkpoint store; cannot resume")
+	}
+	waiters, err := b.checkpoints.Waiting(ctx, corr)
+	if err != nil {
+		return "", err
+	}
+	if len(waiters) == 0 {
+		return "", fmt.Errorf("no suspended step waits on %q", corr)
+	}
+	for _, cp := range waiters {
+		if err := b.checkpoints.Activate(ctx, cp.TaskID, cp.Seq); err != nil {
+			return "", err
+		}
+	}
+	// Precise live resume: same process, in-memory turn state intact.
+	if b.pending != nil && b.pending.corr == corr {
+		py := b.pending
+		b.pending = nil
+		b.currentTask = py.taskID
+		gated := py.calls[py.idx]
+		content := b.decideGatedCall(ctx, gated, granted)
+		if b.onTool != nil {
+			b.onTool(gated.Name, gated.Arguments, content)
+		}
+		b.absorbToolResult(gated, content)
+		if ye := b.runCalls(ctx, py.calls, py.idx+1); ye != nil {
+			return "", ye
+		}
+		return b.run(ctx)
+	}
+	// Rebuild resume: a fresh brain reconstructs context from the step chain.
+	return b.resumeFromCheckpoints(ctx, waiters[0].TaskID, granted)
+}
+
+// decideGatedCall runs the previously-gated effector if approval was granted, or
+// returns the standing denial message if not (fed back to the model, never a crash).
+func (b *Brain) decideGatedCall(ctx context.Context, call llm.ToolCall, granted bool) string {
+	if !granted {
+		return fmt.Sprintf("DENIED: %q requires human approval and it was not granted. Do not retry; either choose a different approach or report that human approval is needed.", call.Name)
+	}
+	eff, ok := b.reg.Get(call.Name)
+	if !ok {
+		return fmt.Sprintf("unknown tool %q", call.Name)
+	}
+	dctx := effector.WithTaskScope(ctx, b.currentTask)
+	res, err := eff.Invoke(dctx, json.RawMessage(call.Arguments))
+	if err != nil {
+		return fmt.Sprintf("effector %q failed (infrastructure): %v", call.Name, err)
+	}
+	if res.IsError {
+		return "tool error: " + res.Content
+	}
+	return res.Content
+}
+
+// resumeFromCheckpoints rebuilds a fresh brain's working context from the task's
+// persisted step chain and re-enters the cognitive loop (§5.7.9: resume rebuilds
+// from steps + working memory, never by replaying history). The granted decision
+// for the step that was awaiting approval is folded into the rebuilt context as L2
+// user-authority data so the model continues from the human's answer.
+func (b *Brain) resumeFromCheckpoints(ctx context.Context, taskID string, granted bool) (string, error) {
+	b.currentTask = taskID
+	steps, err := b.checkpoints.Steps(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	b.seed() // kernel + role card only — the in-memory transcript died with the process
+	b.history = append(b.history, Frame{
+		Authority:  protocol.AuthUser, // the resume briefing carries the human's answer (L2)
+		Provenance: "resume",
+		Role:       llm.RoleUser,
+		Content:    rebuildBriefing(taskID, steps, granted),
+	})
+	return b.run(ctx)
+}
+
+// rebuildBriefing renders the resume context from the step chain: completed steps
+// (goal + distilled result) for continuity, the active step that was awaiting the
+// answer, and the human's granted/denied decision.
+func rebuildBriefing(taskID string, steps []store.Checkpoint, granted bool) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Resuming task %q after an interruption. Progress so far (from the durable step chain):\n", taskID)
+	for _, s := range steps {
+		fmt.Fprintf(&sb, "- step %d [%s] %s", s.Seq, s.Status, s.Goal)
+		if s.Result != "" {
+			fmt.Fprintf(&sb, " => %s", s.Result)
+		}
+		sb.WriteString("\n")
+	}
+	decision := "GRANTED"
+	if !granted {
+		decision = "DENIED"
+	}
+	fmt.Fprintf(&sb, "The action you were waiting on for the active step was %s by the human. Continue the task from here.", decision)
+	return sb.String()
+}
+
+// AsYield extracts a *YieldError from err, reporting whether the loop suspended.
+// Callers use it to tell a durable yield apart from an ordinary failure.
+func AsYield(err error) (*YieldError, bool) {
+	var ye *YieldError
+	if errors.As(err, &ye) {
+		return ye, true
+	}
+	return nil, false
 }
 
 // toolSurface is the set of tools surfaced to the LLM: every registered effector

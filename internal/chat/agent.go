@@ -31,6 +31,12 @@ type Config struct {
 	// approval-gated). Off by default — the approval-free primitives cover
 	// ordinary work; arbitrary shell is opt-in.
 	IncludeRunCommand bool
+	// YieldForApproval switches the brain's approval gate from the synchronous
+	// Approver to durable yield/resume (§5.7.5): a gated effector suspends a step
+	// and the brain returns a *brain.YieldError, woken by Brain.Resume when the
+	// answer arrives over the durable inbox. The bus host sets it; the in-process
+	// Agent leaves it false (synchronous Approver).
+	YieldForApproval bool
 	// OnDelta / OnThinking / OnUsage / OnToolStart / OnTool are the brain's live
 	// sinks (host wires them to the bus). Optional.
 	OnDelta      func(string)
@@ -98,17 +104,19 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 	}
 
 	b := brain.New(brain.Options{
-		Gateway:      cfg.Gateway,
-		Registry:     reg,
-		RoleCard:     roleCard,
-		Approver:     approver,
-		Emitter:      rejectEmitter{}, // chat rejects task_* (open-ended pseudo-task)
-		OnDelta:      cfg.OnDelta,
-		OnThinking:   cfg.OnThinking,
-		OnUsage:      cfg.OnUsage,
-		OnToolStart:  cfg.OnToolStart,
-		OnTool:       cfg.OnTool,
-		OnDelegTrace: cfg.OnDelegTrace,
+		Gateway:          cfg.Gateway,
+		Registry:         reg,
+		RoleCard:         roleCard,
+		Approver:         approver,
+		Emitter:          rejectEmitter{}, // chat rejects task_* (open-ended pseudo-task)
+		Checkpoints:      checkpoints,     // enables durable yield/resume when YieldForApproval is set
+		YieldForApproval: cfg.YieldForApproval,
+		OnDelta:          cfg.OnDelta,
+		OnThinking:       cfg.OnThinking,
+		OnUsage:          cfg.OnUsage,
+		OnToolStart:      cfg.OnToolStart,
+		OnTool:           cfg.OnTool,
+		OnDelegTrace:     cfg.OnDelegTrace,
 	})
 
 	return &Agent{

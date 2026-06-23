@@ -50,15 +50,19 @@ type Host struct {
 	agent         *Agent
 	node          *mesh.Node
 	inbound       *channelInbound
-	approver      *busApprover
 	gw            *mutableGateway // set when the gateway is runtime-reconfigurable
 	agentID       string
 	reportSubject string
-	corr          atomic.Uint64
 	curCorr       atomic.Value // string: correlation id of the turn the worker is on
-	mu            sync.Mutex
-	turnCancel    context.CancelFunc // cancels the in-flight turn (Ctrl-C resets the loop)
-	thinkBuf      strings.Builder    // accumulates the turn's thinking (worker goroutine only)
+	// yieldOrigin maps a yield's correlation id back to the originating turn's
+	// correlation id, so the eventual reply pairs to the user's turn. Worker-only
+	// (written on yield, read on resume — both on the single worker goroutine), so
+	// it needs no lock. Empty after a process restart: a fresh host resumes from
+	// the durable answer's own corr (the original client is gone anyway).
+	yieldOrigin map[string]string
+	mu          sync.Mutex
+	turnCancel  context.CancelFunc // cancels the in-flight turn (Ctrl-C resets the loop)
+	thinkBuf    strings.Builder    // accumulates the turn's thinking (worker goroutine only)
 }
 
 // NewHost assembles a chat agent and binds it to a mesh node under agentID. cfg
@@ -66,22 +70,20 @@ type Host struct {
 // *mutableGateway, control commands can reconfigure it at runtime.
 func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.Option) (*Host, error) {
 	in := newChannelInbound(64)
-	h := &Host{inbound: in, agentID: agentID}
+	h := &Host{inbound: in, agentID: agentID, yieldOrigin: map[string]string{}}
 	h.curCorr.Store("")
 	if mg, ok := cfg.Gateway.(*mutableGateway); ok {
 		h.gw = mg
 	}
 
-	// Approval asks the user over the bus and blocks the loop until the answer is
-	// demuxed back in onMessage.
-	h.approver = newBusApprover(
-		func(corr, desc string) { h.send(context.Background(), corr, Frame{Kind: kindApproval, Text: desc}) },
-		func() string { return fmt.Sprintf("appr-%d", h.corr.Add(1)) },
-	)
+	// Approval is durable yield/resume (§5.7.5): a gated effector suspends a step
+	// and the brain returns a *brain.YieldError; the worker emits the ask and parks,
+	// then resumes when the answer arrives over the durable inbox. The wait survives
+	// process death — a fresh host rebuilds from the persisted step chain.
+	cfg.YieldForApproval = true
 
 	// Stream deltas and per-turn usage back to the user, tagged with the turn the
 	// worker is currently on (set before each Handle; same goroutine).
-	cfg.Approver = h.approver
 	cfg.OnDelta = func(d string) { h.send(context.Background(), h.turnCorr(), Frame{Kind: kindDelta, Text: d}) }
 	cfg.OnUsage = func(u llm.Usage) {
 		h.send(context.Background(), h.turnCorr(), Frame{Kind: kindUsage, Text: usageLine(u)})
@@ -176,7 +178,9 @@ func (h *Host) onMessage(m protocol.Message) {
 	}
 	switch f.Kind {
 	case kindAnswer:
-		h.approver.resolve(m.CorrelationID, strings.EqualFold(strings.TrimSpace(f.Text), approveWord))
+		// An approval answer wakes a suspended step — run Resume on the worker
+		// goroutine (serialized with turns; history is not concurrency-safe).
+		h.inbound.push(m)
 	case kindCancel:
 		h.cancelTurn() // Ctrl-C: reset the in-flight turn only
 	case kindCtrl:
@@ -190,7 +194,10 @@ func (h *Host) onMessage(m protocol.Message) {
 	}
 }
 
-// Run drains inbound and drives the brain serially until ctx is cancelled.
+// Run drains inbound and drives the brain serially until ctx is cancelled. Each
+// pulled message is a worker control, a user turn, or an approval answer (which
+// resumes a yielded turn) — all on this one goroutine, so the brain's history and
+// the yieldOrigin map need no locks.
 func (h *Host) Run(ctx context.Context) error {
 	nodeErr := make(chan error, 1)
 	go func() { nodeErr <- h.node.Run(ctx) }()
@@ -201,51 +208,100 @@ func (h *Host) Run(ctx context.Context) error {
 			break // ctx done
 		}
 		f, _ := decodeFrame(msg.Payload)
-		h.curCorr.Store(msg.CorrelationID)
-
-		if f.Kind == kindCtrl { // worker control: reset / system
+		switch f.Kind {
+		case kindCtrl: // worker control: reset / system
+			h.curCorr.Store(msg.CorrelationID)
 			h.send(ctx, msg.CorrelationID, Frame{Kind: kindCtrl, Text: h.runWorkerCtrl(f.Cmd, f.Arg)})
-			continue
+		case kindAnswer: // an approval answer wakes a yielded turn
+			h.resumeTurn(ctx, msg, f)
+		default: // a user turn
+			h.runTurn(ctx, msg, f)
 		}
+	}
+	return <-nodeErr
+}
 
-		text := string(msg.Payload)
-		if f.Kind == kindSay {
-			text = f.Text
-		}
-		// Per-turn context: Ctrl-C (a /cancel frame) cancels THIS turn only, never
-		// the workflow ctx — the agent stays alive and returns to the prompt.
-		tctx, tcancel := context.WithCancel(ctx)
-		h.setTurnCancel(tcancel)
-		h.thinkBuf.Reset()
-		reply, err := h.agent.Brain.Handle(tctx, protocol.Message{
+// runTurn drives a fresh user turn through the brain, then delivers its outcome
+// (reply, yield, interrupt, or error).
+func (h *Host) runTurn(ctx context.Context, msg protocol.Message, f Frame) {
+	origin := msg.CorrelationID
+	h.curCorr.Store(origin)
+	text := string(msg.Payload)
+	if f.Kind == kindSay {
+		text = f.Text
+	}
+	reply, err, interrupted := h.drive(ctx, func(tctx context.Context) (string, error) {
+		return h.agent.Brain.Handle(tctx, protocol.Message{
 			Type:    protocol.TypeP2P,
 			Sender:  "user",
 			TaskID:  taskOr(msg.TaskID),
 			Payload: []byte(text),
 		})
-		h.setTurnCancel(nil)
-		if h.thinkBuf.Len() > 0 {
-			_ = h.node.Observe(ctx, "thinking", []byte(h.thinkBuf.String())) // mirror to obs (one per turn)
-		}
-		// Capture whether the user interrupted THIS turn before we cancel tctx
-		// ourselves (our own tcancel would otherwise make tctx.Err() non-nil).
-		interrupted := tctx.Err() != nil
-		tcancel()
+	})
+	h.deliverOutcome(ctx, origin, reply, err, interrupted)
+}
 
-		switch {
-		case err == nil:
-			h.send(ctx, msg.CorrelationID, Frame{Kind: kindReply, Text: reply, Done: true})
-		case ctx.Err() != nil:
-			return <-nodeErr // workflow shutting down
-		case interrupted:
-			// User interrupted this turn — reset the loop, stay alive.
-			h.send(ctx, msg.CorrelationID, Frame{Kind: kindReply, Text: "[interrupted]", Done: true})
-		default:
-			slog.Error("chat: turn failed", "err", err)
-			h.send(ctx, msg.CorrelationID, Frame{Kind: kindError, Text: err.Error()})
+// resumeTurn wakes a step suspended by a yield, pairing the eventual reply back to
+// the originating turn. A stray or duplicate answer (no suspended waiter) is
+// ignored quietly.
+func (h *Host) resumeTurn(ctx context.Context, msg protocol.Message, f Frame) {
+	corr := msg.CorrelationID // the yield's correlation id
+	granted := strings.EqualFold(strings.TrimSpace(f.Text), approveWord)
+	origin := h.yieldOrigin[corr]
+	delete(h.yieldOrigin, corr)
+	if origin == "" {
+		origin = corr // unknown (e.g. post-restart): pair the reply to the answer itself
+	}
+	h.curCorr.Store(origin)
+	reply, err, interrupted := h.drive(ctx, func(tctx context.Context) (string, error) {
+		return h.agent.Brain.Resume(tctx, corr, granted)
+	})
+	if err != nil && !interrupted && ctx.Err() == nil {
+		if _, isYield := brain.AsYield(err); !isYield && strings.Contains(err.Error(), "no suspended step") {
+			return // late/duplicate answer — nothing to resume
 		}
 	}
-	return <-nodeErr
+	h.deliverOutcome(ctx, origin, reply, err, interrupted)
+}
+
+// drive runs one brain call under a per-turn context (a /cancel frame cancels THIS
+// turn only, never the workflow), mirrors the turn's thinking to obs, and reports
+// whether the user interrupted it.
+func (h *Host) drive(ctx context.Context, call func(context.Context) (string, error)) (string, error, bool) {
+	tctx, tcancel := context.WithCancel(ctx)
+	h.setTurnCancel(tcancel)
+	h.thinkBuf.Reset()
+	reply, err := call(tctx)
+	h.setTurnCancel(nil)
+	if h.thinkBuf.Len() > 0 {
+		_ = h.node.Observe(ctx, "thinking", []byte(h.thinkBuf.String())) // mirror to obs (one per turn)
+	}
+	// Capture whether the user interrupted before our own tcancel runs.
+	interrupted := tctx.Err() != nil
+	tcancel()
+	return reply, err, interrupted
+}
+
+// deliverOutcome turns a brain call's result into a frame. A *brain.YieldError
+// parks the turn: it records which turn the yield belongs to and emits the
+// approval ask, then waits for the answer over the durable inbox.
+func (h *Host) deliverOutcome(ctx context.Context, origin, reply string, err error, interrupted bool) {
+	if ye, ok := brain.AsYield(err); ok {
+		h.yieldOrigin[ye.Corr] = origin
+		h.send(ctx, ye.Corr, Frame{Kind: kindApproval, Text: ye.Description})
+		return
+	}
+	switch {
+	case err == nil:
+		h.send(ctx, origin, Frame{Kind: kindReply, Text: reply, Done: true})
+	case ctx.Err() != nil:
+		return // workflow shutting down
+	case interrupted:
+		h.send(ctx, origin, Frame{Kind: kindReply, Text: "[interrupted]", Done: true})
+	default:
+		slog.Error("chat: turn failed", "err", err)
+		h.send(ctx, origin, Frame{Kind: kindError, Text: err.Error()})
+	}
 }
 
 // send publishes a frame to the control plane's report subject, paired by corr.

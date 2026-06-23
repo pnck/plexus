@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/chzyer/readline"
@@ -44,17 +45,20 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 		agentID = "chat-agent"
 	}
 
-	// Ephemeral JetStream store: this chat session is non-persisted (the SQLite
-	// DB is :memory: too), so the store lives in a temp dir cleaned on exit. Within
-	// the session the durable inbox still survives an agent-consumer reconnect;
-	// cross-process resume (persistent store) is a deployment concern, not chat's.
-	storeDir, err := os.MkdirTemp("", "plexus-chat-js-*")
-	if err != nil {
-		return fmt.Errorf("chat: js store dir: %w", err)
+	// Persistent session stores at a stable per-agent path so a suspended step
+	// (a yield awaiting approval, §5.7.5) survives a restart: the JetStream file
+	// store retains the durable inbox + answer, and the brain's checkpoint chain
+	// lives in a file SQLite DB (see NewHost below). On the next `plexus chat` the
+	// agent reconnects, the retained answer replays, and it resumes from the step
+	// chain. Not cleaned on exit — that persistence is the point (E1.4).
+	sessionDir := filepath.Join(os.TempDir(), "plexus-chat", agentID)
+	jsStore := filepath.Join(sessionDir, "js")
+	if err := os.MkdirAll(jsStore, 0o700); err != nil {
+		return fmt.Errorf("chat: session store dir: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(storeDir) }()
+	dbPath := filepath.Join(sessionDir, "brain.db")
 
-	ns, err := server.StartEmbeddedNATS(port, storeDir)
+	ns, err := server.StartEmbeddedNATS(port, jsStore)
 	if err != nil {
 		return fmt.Errorf("chat: start embedded NATS: %w", err)
 	}
@@ -101,7 +105,7 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 	// The agent, assembled and hosted on the bus.
 	h, err := NewHost(ctx, agentID, Config{
 		Gateway:           cfg.Gateway,
-		DBPath:            ":memory:", // single, non-persisted session — no save/resume
+		DBPath:            dbPath, // persistent: the step chain survives restarts for resume (E1.4)
 		RoleCard:          cfg.RoleCard,
 		IncludeRunCommand: cfg.IncludeRunCommand,
 	}, mesh.WithNatsURL(url))
