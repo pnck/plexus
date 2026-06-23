@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,18 @@ import (
 	"plexus/protocol"
 	"plexus/server"
 )
+
+// freePort returns a currently-unused localhost TCP port so the embedded NATS
+// server does not clash with a running `plexus chat` or another test.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	return l.Addr().(*net.TCPAddr).Port
+}
 
 func TestMeshCommunicationSmoke(t *testing.T) {
 	// 1. Build the test-agent binary in a temporary directory
@@ -35,8 +48,10 @@ func TestMeshCommunicationSmoke(t *testing.T) {
 		t.Fatalf("Failed to build plexus-test-smoke_fixture binary: %v\n%s", err, string(out))
 	}
 
-	// 2. Start embedded NATS server for the test
-	port := 4222
+	// 2. Start embedded NATS server for the test on a free port (so it does not
+	// clash with a running `plexus chat` or a parallel test on the default 4222).
+	port := freePort(t)
+	natsURL := fmt.Sprintf("nats://127.0.0.1:%d", port)
 	ns, err := server.StartEmbeddedNATS(port)
 	if err != nil {
 		t.Fatalf("Failed to start embedded NATS: %v", err)
@@ -49,12 +64,12 @@ func TestMeshCommunicationSmoke(t *testing.T) {
 	// 3. Start Control Plane SDK with async report gathering
 	reportChan := make(chan protocol.Message, 1000)
 	srv := server.New(
-		server.WithNatsURL(fmt.Sprintf("nats://127.0.0.1:%d", port)),
+		server.WithNatsURL(natsURL),
 		server.WithOnReport(func(msg protocol.Message) {
 			reportChan <- msg
 		}),
 	)
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -78,6 +93,7 @@ func TestMeshCommunicationSmoke(t *testing.T) {
 	// Helper to spawn an agent
 	spawnAgent := func(id, groups, queueGroups string, pingTargets []string) {
 		cmd := exec.Command(binPath,
+			"--nats-url", natsURL,
 			"--id", id,
 			"--groups", groups,
 			"--queue-groups", queueGroups,
@@ -129,13 +145,15 @@ func TestMeshCommunicationSmoke(t *testing.T) {
 	for _, id := range agentIDs {
 		var pings []string
 		for _, other := range agentIDs {
-			if other != id { pings = append(pings, other) }
+			if other != id {
+				pings = append(pings, other)
+			}
 		}
 		spawnAgent(id, configs[id].groups, configs[id].queueGroups, pings)
 	}
 
 	time.Sleep(2 * time.Second) // Let them boot
-	
+
 	registered := srv.GetRegisteredAgents()
 	if len(registered) != 3 {
 		t.Errorf("Phase 1: Expected 3 agents registered, got %d", len(registered))
@@ -182,7 +200,7 @@ func TestMeshCommunicationSmoke(t *testing.T) {
 	t.Logf("=== PHASE 2: DYNAMIC SUBAGENT (D) ===")
 	// Agent D connects late, targets A and B
 	spawnAgent("D", "frontend", "worker_pool:my_workers", []string{"A", "B"})
-	
+
 	time.Sleep(2 * time.Second) // Let D boot and ping
 
 	registered2 := srv.GetRegisteredAgents()

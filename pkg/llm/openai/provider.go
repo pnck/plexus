@@ -81,40 +81,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 
 // GenerateStream calls the OpenAI Chat Completions streaming API.
 func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools []llm.ToolDefinition) (llm.EventStream, error) {
-	// Map our unified messages to OpenAI specific formats
-	var oaiMsgs []openai.ChatCompletionMessageParamUnion
-	for _, m := range msgs {
-		switch m.Role {
-		case llm.RoleSystem:
-			oaiMsgs = append(oaiMsgs, openai.SystemMessage(m.Content))
-		case llm.RoleUser:
-			oaiMsgs = append(oaiMsgs, openai.UserMessage(m.Content))
-		case llm.RoleAssistant:
-			// Handle assistant messages and potential tool calls
-			if len(m.ToolCalls) > 0 {
-				var calls []openai.ChatCompletionMessageToolCallParam
-				for _, tc := range m.ToolCalls {
-					calls = append(calls, openai.ChatCompletionMessageToolCallParam{
-						ID: tc.ID,
-						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      tc.Name,
-							Arguments: tc.Arguments,
-						},
-					})
-				}
-				oaiMsgs = append(oaiMsgs, openai.ChatCompletionMessageParamUnion{
-					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
-						Content:   openai.ChatCompletionAssistantMessageParamContentUnion{OfString: openai.String(m.Content)},
-						ToolCalls: calls,
-					},
-				})
-			} else {
-				oaiMsgs = append(oaiMsgs, openai.AssistantMessage(m.Content))
-			}
-		case llm.RoleTool:
-			oaiMsgs = append(oaiMsgs, openai.ToolMessage(m.ToolCallID, m.Content))
-		}
-	}
+	oaiMsgs := toOpenAIMessages(msgs)
 
 	// Map tools
 	var oaiTools []openai.ChatCompletionToolParam
@@ -145,6 +112,47 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 
 	return &openaiStream{stream: stream}, nil
+}
+
+// toOpenAIMessages maps our unified messages to OpenAI's request format,
+// including assistant tool-call turns and tool results. Extracted so the
+// mapping — in particular the tool_call_id pairing — is unit-testable without a
+// live endpoint.
+func toOpenAIMessages(msgs []llm.Message) []openai.ChatCompletionMessageParamUnion {
+	var oaiMsgs []openai.ChatCompletionMessageParamUnion
+	for _, m := range msgs {
+		switch m.Role {
+		case llm.RoleSystem:
+			oaiMsgs = append(oaiMsgs, openai.SystemMessage(m.Content))
+		case llm.RoleUser:
+			oaiMsgs = append(oaiMsgs, openai.UserMessage(m.Content))
+		case llm.RoleAssistant:
+			if len(m.ToolCalls) > 0 {
+				var calls []openai.ChatCompletionMessageToolCallParam
+				for _, tc := range m.ToolCalls {
+					calls = append(calls, openai.ChatCompletionMessageToolCallParam{
+						ID: tc.ID,
+						Function: openai.ChatCompletionMessageToolCallFunctionParam{
+							Name:      tc.Name,
+							Arguments: tc.Arguments,
+						},
+					})
+				}
+				oaiMsgs = append(oaiMsgs, openai.ChatCompletionMessageParamUnion{
+					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+						Content:   openai.ChatCompletionAssistantMessageParamContentUnion{OfString: openai.String(m.Content)},
+						ToolCalls: calls,
+					},
+				})
+			} else {
+				oaiMsgs = append(oaiMsgs, openai.AssistantMessage(m.Content))
+			}
+		case llm.RoleTool:
+			// SDK signature is ToolMessage(content, toolCallID) — content first.
+			oaiMsgs = append(oaiMsgs, openai.ToolMessage(m.Content, m.ToolCallID))
+		}
+	}
+	return oaiMsgs
 }
 
 // pendingToolCall accumulates fragmented tool-call deltas across chunks, keyed by Index.
