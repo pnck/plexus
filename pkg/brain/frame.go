@@ -32,7 +32,7 @@ type Frame struct {
 }
 
 // stampAuthority maps an inbound message's source channel to its authority layer
-// (§5.7.3). Inbound is always structured (never raw); the brain decides the layer
+// (§5.7.3). An inbound message is always structured (never raw); the brain decides the layer
 // from the channel, NOT from message-carried text — that is the structural
 // defense against tool output or control-plane messages impersonating user
 // instructions. If the envelope already carries an explicit Authority, it is

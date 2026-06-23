@@ -1,8 +1,9 @@
-// Package store implements the agent's local persistence layer: the four
+// Package store implements the agent's local persistence layer: the
 // state/memory types of §5.7.9 (WorkingMemory, TranscriptArchive,
-// LongTermMemory, Checkpoint), each backed by its OWN SQLite database — they do
-// not share a connection. This file provides the shared SQLite layer; the
-// per-type stores live alongside it (checkpoint.go first).
+// LongTermMemory, Checkpoint). Each store is table-scoped, so several may share
+// one *sql.DB — the brain-private Checkpoint and WorkingMemory stores share a
+// single connection (§5.7.9 revised). This file provides the shared SQLite
+// layer; the per-type stores live alongside it (checkpoint.go first).
 package store
 
 import (

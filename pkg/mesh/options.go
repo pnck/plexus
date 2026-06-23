@@ -16,8 +16,8 @@ type Options struct {
 	QueuePrefix     string
 	RegisterSubject string
 	ReportSubject   string
-	// ObserveSubject is the prefix for observability streams (trace / raw / log /
-	// delegation transcripts). A node publishes to ObserveSubject+<id>+"."+<kind>,
+	// ObserveSubject is the prefix for observability streams (trace / raw / deleg
+	// transcripts / thinking / log). A node publishes to ObserveSubject+<id>+"."+<kind>,
 	// kept OFF the functional report channel so debug consumers subscribe by
 	// wildcard (e.g. sys.obs.>) without touching sys.report.
 	ObserveSubject string

@@ -62,12 +62,6 @@ type NopEmitter struct{}
 // Emit discards the event.
 func (NopEmitter) Emit(context.Context, TaskEvent) error { return nil }
 
-// FuncEmitter adapts a function to Emitter, for tests and simple sinks.
-type FuncEmitter func(ctx context.Context, ev TaskEvent) error
-
-// Emit calls the underlying function.
-func (f FuncEmitter) Emit(ctx context.Context, ev TaskEvent) error { return f(ctx, ev) }
-
 const (
 	taskReportToolName = "task_report"
 	taskRevertToolName = "task_revert"

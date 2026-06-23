@@ -95,12 +95,6 @@ func (g *fakeGateway) GenerateStream(_ context.Context, msgs []llm.Message, _ []
 
 // ---- helpers --------------------------------------------------------------
 
-// directInbound feeds a single message then blocks; for these tests we drive the
-// brain via Handle, so Inbound is only present to satisfy the seam.
-type directInbound struct{ msg protocol.Message }
-
-func (d directInbound) Recv(context.Context) (protocol.Message, error) { return d.msg, nil }
-
 func userMsg(text string) protocol.Message {
 	return protocol.Message{Type: protocol.TypeP2P, Sender: "user", Payload: []byte(text)}
 }
@@ -138,7 +132,7 @@ func TestBrainEffectorThenFinal(t *testing.T) {
 		{text: "done: I read the file"},
 	}}
 
-	b := New(Options{Gateway: gw, Registry: reg, RoleCard: RoleCard{SystemPrompt: "you are a dev agent"}, Inbound: directInbound{}})
+	b := New(Options{Gateway: gw, Registry: reg, RoleCard: RoleCard{SystemPrompt: "you are a dev agent"}})
 	out, err := b.Handle(context.Background(), userMsg("read /x please"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -178,7 +172,7 @@ func TestBrainApprovalDenied(t *testing.T) {
 		{text: "understood, I will not run it"},
 	}}
 
-	b := New(Options{Gateway: gw, Registry: reg, Approver: approver, Inbound: directInbound{}})
+	b := New(Options{Gateway: gw, Registry: reg, Approver: approver})
 	out, err := b.Handle(context.Background(), userMsg("delete everything"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -217,7 +211,7 @@ func TestBrainDelegateSpawnsDelegation(t *testing.T) {
 		},
 	}
 
-	b := New(Options{Gateway: gw, Registry: reg, Inbound: directInbound{}})
+	b := New(Options{Gateway: gw, Registry: reg})
 	out, err := b.Handle(context.Background(), userMsg("survey the repo"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -331,7 +325,7 @@ func TestRoleCardSeedsL1(t *testing.T) {
 		t.Fatalf("unexpected system prompt: %q", sp.SystemPrompt)
 	}
 
-	b := New(Options{Gateway: &fakeGateway{}, RoleCard: sp, Inbound: directInbound{}})
+	b := New(Options{Gateway: &fakeGateway{}, RoleCard: sp})
 	h := b.History()
 	// L1 = kernel principles frame FIRST, then the role card frame (§5.7.11).
 	if len(h) != 2 || h[0].Provenance != "principles" || h[1].Provenance != "role_card" {
@@ -341,7 +335,7 @@ func TestRoleCardSeedsL1(t *testing.T) {
 		t.Fatalf("L1 frames must be AuthSystem: %+v", h)
 	}
 	// compose: the kernel renders first, the role card second, both as system.
-	b2 := New(Options{Gateway: &fakeGateway{}, RoleCard: sp, Inbound: directInbound{}})
+	b2 := New(Options{Gateway: &fakeGateway{}, RoleCard: sp})
 	b2.history = append(b2.history, Frame{Authority: protocol.AuthUser, Role: llm.RoleUser, Content: "hello"})
 	msgs := compose(b2.history)
 	if msgs[0].Role != llm.RoleSystem || !strings.Contains(msgs[0].Content, "KERNEL") {

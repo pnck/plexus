@@ -32,7 +32,7 @@ func TestTaskRevertEmitsRequest(t *testing.T) {
 		{text: "ok, I have flagged it"},
 	}}
 
-	b := New(Options{Gateway: gw, Emitter: em, Inbound: directInbound{}})
+	b := New(Options{Gateway: gw, Emitter: em})
 	out, err := b.Handle(context.Background(), userMsg("the prior task was wrong"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -70,7 +70,7 @@ func TestTaskReportUsesCurrentTask(t *testing.T) {
 		{text: "reported"},
 	}}
 
-	b := New(Options{Gateway: gw, Emitter: em, Inbound: directInbound{}})
+	b := New(Options{Gateway: gw, Emitter: em})
 	msg := protocol.Message{Type: protocol.TypeP2P, Sender: "user", TaskID: "CUR-1", Payload: []byte("do the thing")}
 	if _, err := b.Handle(context.Background(), msg); err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -88,7 +88,7 @@ func TestTaskReportUsesCurrentTask(t *testing.T) {
 // Test: the task channel tools are surfaced to the brain but NEVER to a
 // delegation (the envelope is effectors-only; task_* ride the brain-owned bus).
 func TestTaskToolsNotInDelegationSurface(t *testing.T) {
-	b := New(Options{Gateway: &fakeGateway{}, Inbound: directInbound{}})
+	b := New(Options{Gateway: &fakeGateway{}})
 	var sawTaskTool bool
 	for _, d := range b.toolSurface() {
 		if d.Name == taskReportToolName || d.Name == taskRevertToolName {

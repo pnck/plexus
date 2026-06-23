@@ -183,23 +183,6 @@ func (a *Node) JoinQueueGroup(ctx context.Context, group string, queueName strin
 	return nil
 }
 
-// LeaveGroup unsubscribes from a group
-func (a *Node) LeaveGroup(ctx context.Context, key string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if sub, exists := a.groups[key]; exists {
-		_ = sub.Unsubscribe()
-		delete(a.groups, key)
-	} else {
-		delete(a.pendingGroup, key)
-	}
-	return nil
-}
-
 // SendMessage sends a P2P message to another Node
 func (a *Node) SendMessage(ctx context.Context, target string, payload []byte) error {
 	msg := protocol.Message{

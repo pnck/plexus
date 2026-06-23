@@ -10,17 +10,6 @@ import (
 	"plexus/protocol"
 )
 
-// Inbound is the brain's structured-message intake (§5.7.3). The brain receives
-// STRUCTURED protocol.Messages (never raw text) and stamps each into an authority
-// layer by its source channel. This is an interface so NATS wiring stays out of
-// scope (E1.2/E2.6); tests feed messages directly. The brain owns the bus
-// endpoint — delegations never do (§5.7.7).
-type Inbound interface {
-	// Recv blocks until the next structured inbound message is available, or ctx
-	// is cancelled.
-	Recv(ctx context.Context) (protocol.Message, error)
-}
-
 // Approver is the Yield-for-Approval seam (§5.4.3 / §5.7.4). Before running an
 // effector the policy marks approval-required, the brain calls RequestApproval.
 // A durable CLI/yield implementation lands later (E2.6/E1.4); here it is a plain
@@ -50,17 +39,15 @@ func (f FuncApprover) RequestApproval(ctx context.Context, eff effector.Effector
 }
 
 // Brain is an agent's SINGLETON cognition (§5.7): a role card seeded as L1, a
-// layered in-memory history, a gateway, an effector Registry, a structured
-// Inbound, and an Approver seam. It owns the only bus endpoint; delegations it
-// spawns hold none.
+// layered in-memory history, a gateway, an effector Registry, and an Approver
+// seam. It owns the only bus endpoint; delegations it spawns hold none.
 type Brain struct {
 	gateway            llm.Provider
 	reg                *effector.Registry
 	roleCard           RoleCard // structured role card; its SystemPrompt seeds an L1 frame (after the kernel)
 	emitter            Emitter  // outbound seam to the control plane (task_* events, §5.7.10)
-	history            []Frame  // in-memory working memory (SQLite checkpoint is E2.5)
+	history            []Frame  // in-memory working transcript; the durable plan lives in the CheckpointStore (§5.7.9)
 	currentTask        string   // TaskID of the message being handled; scopes effectors and task_report
-	inbound            Inbound
 	approver           Approver
 	onDelta            func(string)                    // optional: live streamed-text sink (nil = off)
 	onThinking         func(string)                    // optional: live reasoning/thinking sink (nil = off)
@@ -85,7 +72,6 @@ type Options struct {
 	Gateway  llm.Provider
 	Registry *effector.Registry
 	RoleCard RoleCard
-	Inbound  Inbound
 	Approver Approver
 	// Emitter is the outbound seam to the control plane for task_* domain events
 	// (§5.7.10). Defaults to NopEmitter (drops events) when nil — the real
@@ -147,7 +133,6 @@ func New(opt Options) *Brain {
 		reg:                opt.Registry,
 		roleCard:           opt.RoleCard,
 		emitter:            emitter,
-		inbound:            opt.Inbound,
 		approver:           app,
 		onDelta:            opt.OnDelta,
 		onThinking:         opt.OnThinking,
@@ -200,33 +185,21 @@ func (b *Brain) SetRoleCard(rc RoleCard) {
 // command to show the active system prompt without mutating history.
 func (b *Brain) RoleCard() RoleCard { return b.roleCard }
 
-// History returns a snapshot of the brain's current history frames. Exposed so a
-// checkpoint layer (E2.5) and tests can inspect what would be persisted; the
-// brain itself keeps history in memory.
+// History returns a snapshot of the brain's current history frames. Exposed so
+// the checkpoint layer and tests can inspect what would be persisted; the brain
+// itself keeps history in memory.
 func (b *Brain) History() []Frame {
 	out := make([]Frame, len(b.history))
 	copy(out, b.history)
 	return out
 }
 
-// Step receives one structured inbound message, stamps it into the right
-// authority layer, and runs the cognitive loop to convergence, returning the
-// final reply text. This is the §5.7.8 flowchart minus the (E2.5) SQLite
-// checkpoint, whose insertion point is marked below.
-func (b *Brain) Step(ctx context.Context) (string, error) {
-	msg, err := b.inbound.Recv(ctx)
-	if err != nil {
-		return "", err
-	}
-	// ① stamp authority by source channel (Sender → L-layer, §5.7.3).
-	b.currentTask = msg.TaskID
-	b.history = append(b.history, frameFromInbound(msg))
-	return b.run(ctx)
-}
-
-// Handle injects an already-constructed inbound message (bypassing Inbound) and
-// runs the loop. Useful for tests and for callers that already hold the message.
+// Handle stamps a structured inbound message into its authority layer (§5.7.3)
+// and runs the cognitive loop to convergence, returning the final reply text.
+// It is the brain's single intake: the host pushes messages off the bus and
+// calls Handle; there is no separate pull loop.
 func (b *Brain) Handle(ctx context.Context, msg protocol.Message) (string, error) {
+	// ① stamp authority by source channel (Sender → L-layer, §5.7.3).
 	b.currentTask = msg.TaskID
 	b.history = append(b.history, frameFromInbound(msg))
 	return b.run(ctx)

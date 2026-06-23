@@ -69,5 +69,5 @@ var watchCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(watchCmd)
 	watchCmd.Flags().StringVar(&watchNatsURL, "nats-url", "nats://127.0.0.1:4222", "NATS URL of the mesh to watch")
-	watchCmd.Flags().StringVar(&watchKind, "kind", "", "Filter to one obs kind (trace|raw|log|deleg); default all")
+	watchCmd.Flags().StringVar(&watchKind, "kind", "", "Filter to one obs kind (trace|raw|deleg|thinking|log); default all")
 }

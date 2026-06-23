@@ -122,7 +122,7 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 
 // Handle runs one user turn through the brain under the standing chat task, and
 // returns the agent's reply. This is the in-process entry point (the bus host
-// will instead feed the brain's Inbound).
+// instead drives the brain via Brain.Handle off pushed bus messages).
 func (a *Agent) Handle(ctx context.Context, text string) (string, error) {
 	return a.Brain.Handle(ctx, protocol.Message{
 		Type:    protocol.TypeP2P, // direct human message -> L2 user instruction

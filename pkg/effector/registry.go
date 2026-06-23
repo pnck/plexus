@@ -59,13 +59,6 @@ func (r *Registry) List() []Effector {
 	return out
 }
 
-// Policy returns the registry's approval policy.
-func (r *Registry) Policy() Policy {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.policy
-}
-
 // RequiresApproval reports whether invoking the named effector requires human
 // approval per the registry's policy. Unknown effectors are reported as
 // requiring approval (conservative default).
