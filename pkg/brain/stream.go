@@ -10,13 +10,15 @@ import (
 // stream drives one gateway generation to completion, accumulating streamed text
 // and collecting any tool calls. It consumes StreamEvents per §5.7.8 ⑤: DeltaText
 // chunks are concatenated, ToolCalls are collected, and the stream is drained to
-// FinishReason. A stream-level error (event.Error or stream.Err) is returned so
-// the caller can decide how to surface it. Used by both the brain loop and the
+// FinishReason. If onDelta is non-nil it is called with each text chunk as it
+// arrives (live display); pass nil to disable. Token usage from the terminal
+// event is returned. A stream-level error (event.Error or stream.Err) is returned
+// so the caller can decide how to surface it. Used by both the brain loop and the
 // delegation loop.
-func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools []llm.ToolDefinition) (text string, calls []llm.ToolCall, err error) {
+func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools []llm.ToolDefinition, onDelta func(string)) (text string, calls []llm.ToolCall, usage llm.Usage, err error) {
 	es, err := gateway.GenerateStream(ctx, msgs, tools)
 	if err != nil {
-		return "", nil, err
+		return "", nil, usage, err
 	}
 	defer func() { _ = es.Close() }()
 
@@ -24,19 +26,25 @@ func stream(ctx context.Context, gateway llm.Provider, msgs []llm.Message, tools
 	for es.Next() {
 		ev := es.Current()
 		if ev.Error != nil {
-			return string(sb), calls, ev.Error
+			return string(sb), calls, usage, ev.Error
 		}
 		if ev.DeltaText != "" {
 			sb = append(sb, ev.DeltaText...)
+			if onDelta != nil {
+				onDelta(ev.DeltaText)
+			}
 		}
 		if ev.ToolCall != nil {
 			calls = append(calls, *ev.ToolCall)
 		}
+		if ev.Usage != nil {
+			usage = *ev.Usage
+		}
 	}
 	if e := es.Err(); e != nil {
-		return string(sb), calls, e
+		return string(sb), calls, usage, e
 	}
-	return string(sb), calls, nil
+	return string(sb), calls, usage, nil
 }
 
 // toolDefs converts a slice of effectors into LLM tool definitions (name /

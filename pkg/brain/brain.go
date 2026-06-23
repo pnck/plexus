@@ -62,8 +62,11 @@ type Brain struct {
 	currentTask        string   // TaskID of the message being handled; scopes effectors and task_report
 	inbound            Inbound
 	approver           Approver
-	maxTurns           int // cognitive-loop bound (runaway-model guard)
-	delegationMaxTurns int // bound passed to each spawned delegation's loop
+	onDelta            func(string)                    // optional: live streamed-text sink (nil = off)
+	onUsage            func(llm.Usage)                 // optional: per-turn token usage sink (nil = off)
+	onTool             func(name, args, result string) // optional: per tool/delegation dispatch (observability)
+	maxTurns           int                             // cognitive-loop bound (runaway-model guard)
+	delegationMaxTurns int                             // bound passed to each spawned delegation's loop
 }
 
 // Default loop bounds applied in New() when the corresponding Options field is 0.
@@ -91,6 +94,16 @@ type Options struct {
 	// DelegationMaxTurns bounds each spawned delegation's lean LLM<->tools loop.
 	// Defaults to 16 when 0.
 	DelegationMaxTurns int
+	// OnDelta, if set, receives streamed assistant-text chunks as they arrive
+	// during the cognitive loop (live display). Called on the loop's goroutine.
+	OnDelta func(string)
+	// OnUsage, if set, receives the accumulated token usage once per turn, just
+	// before the final reply is returned.
+	OnUsage func(llm.Usage)
+	// OnTool, if set, is called after each tool/delegation dispatch with the tool
+	// name, its JSON arguments, and the result fed back to the model — a pure
+	// observability tap (the result still flows into history regardless).
+	OnTool func(name, args, result string)
 }
 
 // New constructs a Brain and seeds its history with the role card as the L1
@@ -119,27 +132,48 @@ func New(opt Options) *Brain {
 		emitter:            emitter,
 		inbound:            opt.Inbound,
 		approver:           app,
+		onDelta:            opt.OnDelta,
+		onUsage:            opt.OnUsage,
+		onTool:             opt.OnTool,
 		maxTurns:           maxTurns,
 		delegationMaxTurns: delegationMaxTurns,
 	}
-	// L1 kernel: the built-in operating principles seed the highest layer FIRST
-	// (§5.7.11), so the universal invariants precede the role card's
-	// specialization. compose() renders all system frames in order.
+	b.seed()
+	return b
+}
+
+// seed (re)initializes history with the L1 system frames: the built-in kernel
+// principles FIRST (§5.7.11), then the role card — so the universal invariants
+// precede the role's specialization. compose() renders system frames in order.
+// Not concurrency-safe: callers must run it on the loop's goroutine.
+func (b *Brain) seed() {
+	b.history = b.history[:0]
 	b.history = append(b.history, Frame{
 		Authority:  protocol.AuthSystem,
 		Provenance: "principles",
 		Role:       llm.RoleSystem,
 		Content:    principlesPrompt,
 	})
-	if opt.RoleCard.SystemPrompt != "" {
+	if b.roleCard.SystemPrompt != "" {
 		b.history = append(b.history, Frame{
 			Authority:  protocol.AuthSystem,
 			Provenance: "role_card",
 			Role:       llm.RoleSystem,
-			Content:    opt.RoleCard.SystemPrompt,
+			Content:    b.roleCard.SystemPrompt,
 		})
 	}
-	return b
+}
+
+// Reset clears the conversation and re-seeds L1 (kernel + current role card) —
+// the /reset command. Not concurrency-safe: call it from the goroutine that
+// drives the cognitive loop (the bus host serializes it with turns).
+func (b *Brain) Reset() { b.seed() }
+
+// SetRoleCard replaces the role card and resets — the /system command. Same
+// single-goroutine constraint as Reset.
+func (b *Brain) SetRoleCard(rc RoleCard) {
+	b.roleCard = rc
+	b.seed()
 }
 
 // History returns a snapshot of the brain's current history frames. Exposed so a
@@ -179,6 +213,7 @@ func (b *Brain) Handle(ctx context.Context, msg protocol.Message) (string, error
 // The loop is bounded by the brain's configured MaxTurns (runaway-model guard).
 func (b *Brain) run(ctx context.Context) (string, error) {
 	tools := b.toolSurface()
+	var turnUsage llm.Usage
 	for turn := 0; turn < b.maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -186,10 +221,13 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 		// ② compose() renders frames into a layered message list.
 		msgs := compose(b.history)
 		// ③ gateway stream + ④ parse StreamEvents. (No mode gate — plexus has none.)
-		text, calls, err := stream(ctx, b.gateway, msgs, tools)
+		text, calls, usage, err := stream(ctx, b.gateway, msgs, tools, b.onDelta)
 		if err != nil {
 			return "", err
 		}
+		turnUsage.PromptTokens += usage.PromptTokens
+		turnUsage.CompletionTokens += usage.CompletionTokens
+		turnUsage.TotalTokens += usage.TotalTokens
 		// ⑤ decide intent.
 		if len(calls) == 0 {
 			// Final reply (no tool calls) -> converge. Record it and emit.
@@ -199,6 +237,9 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 				Role:       llm.RoleAssistant,
 				Content:    text,
 			})
+			if b.onUsage != nil {
+				b.onUsage(turnUsage)
+			}
 			// ⑦ §5.7.9: there is no history-as-checkpoint. The step plan IS the
 			// checkpoint chain and the agent already persists it via the step_*
 			// tools (CheckpointStore); history frames are the step's droppable
@@ -220,6 +261,9 @@ func (b *Brain) run(ctx context.Context) (string, error) {
 		dctx := effector.WithTaskScope(ctx, b.currentTask)
 		for _, call := range calls {
 			content := b.dispatch(dctx, call)
+			if b.onTool != nil {
+				b.onTool(call.Name, call.Arguments, content)
+			}
 			b.history = append(b.history, Frame{
 				Authority:  protocol.AuthTool, // ⑥ tool/delegation results are L3 data
 				Provenance: call.Name,

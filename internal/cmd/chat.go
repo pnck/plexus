@@ -32,10 +32,10 @@ var chatCmd = &cobra.Command{
 	Use:   "chat",
 	Short: "Chat with a fully assembled plexus agent over the mesh",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		gw, err := chat.ResolveGateway(chatProvider, chatModel, chatBaseURL, chatDebug).Build()
-		if err != nil {
-			return err
-		}
+		// A runtime-reconfigurable gateway: chat starts even without a key — the
+		// user sets one in-session with /key (no startup failure).
+		gw := chat.NewMutableGateway(chat.ResolveGateway(chatProvider, chatModel, chatBaseURL, chatDebug))
+
 		var roleCard brain.RoleCard
 		if chatSystem != "" {
 			roleCard = brain.RoleCard{SystemPrompt: chatSystem}

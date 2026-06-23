@@ -4,85 +4,102 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"plexus/pkg/llm"
 	"plexus/pkg/mesh"
 	"plexus/protocol"
 )
 
-// host.go is the Brain⇄bus bridge (E2.6.2/.4): it hosts an assembled chat agent
-// on a mesh Node and turns the bus into the brain's structured Inbound. Inbound
-// messages arrive on the node's inbox (push, via OnMessage); a single worker
-// drives the brain serially (the brain's history is not concurrency-safe) and
-// reports each reply back over the bus. Approval requests and their answers ride
-// the same bus, demuxed here (see onMessage). There is no session — every turn
-// is scoped by the message's TaskID (the standing chat task, §5.7.10).
+// host.go is the Brain⇄bus bridge: it hosts an assembled chat agent on a mesh
+// Node and turns the bus into the agent's driver. Frames arrive on the node's
+// inbox (push, via OnMessage, one goroutine per message); a single worker drains
+// them and drives the brain serially (history is not concurrency-safe). The
+// worker handles user turns and the history-mutating control commands
+// (reset/system); read-only control commands and approval answers are handled on
+// the push goroutine. Streamed deltas, replies, approvals and control results
+// all go back as frames on sys.report.
 
-// channelInbound adapts the node's push-style OnMessage callback to the brain's
-// pull-style Inbound seam, serializing access: pushes are buffered, and the
-// single worker pulls one at a time via Recv. It records the most recently
-// received message so the worker can pair the reply's CorrelationID.
+// channelInbound buffers pushed messages for the single worker to pull.
 type channelInbound struct {
-	ch   chan protocol.Message
-	last protocol.Message
+	ch chan protocol.Message
 }
 
 func newChannelInbound(buf int) *channelInbound {
 	return &channelInbound{ch: make(chan protocol.Message, buf)}
 }
 
-// Recv returns the next inbound message, or ctx error on shutdown.
-func (c *channelInbound) Recv(ctx context.Context) (protocol.Message, error) {
+func (c *channelInbound) recv(ctx context.Context) (protocol.Message, error) {
 	select {
 	case <-ctx.Done():
 		return protocol.Message{}, ctx.Err()
 	case m := <-c.ch:
-		c.last = m // safe: only the single worker reads `last`, after Recv returns
 		return m, nil
 	}
 }
 
-// push enqueues an inbound message (called from the node's OnMessage goroutine).
 func (c *channelInbound) push(m protocol.Message) { c.ch <- m }
 
-// Host is a chat agent bound to the mesh: an assembled Agent whose brain is fed
-// by the bus, whose replies report back to the control plane, and whose approval
-// requests round-trip to the user over the bus.
+// Host is a chat agent bound to the mesh.
 type Host struct {
 	agent         *Agent
 	node          *mesh.Node
 	inbound       *channelInbound
 	approver      *busApprover
+	gw            *mutableGateway // set when the gateway is runtime-reconfigurable
 	agentID       string
 	reportSubject string
 	corr          atomic.Uint64
+	curCorr       atomic.Value // string: correlation id of the turn the worker is on
+	traceOn       atomic.Bool  // /trace: emit tool/delegation trace frames
 }
 
 // NewHost assembles a chat agent and binds it to a mesh node under agentID. cfg
-// is completed with a channel-backed Inbound and the bus approver (any
-// cfg.Inbound / cfg.Approver are overridden). nodeOpts carry transport config
-// (e.g. mesh.WithNATSConn / WithNatsURL).
+// is completed with the bus approver and the streaming sinks. If cfg.Gateway is a
+// *mutableGateway, control commands can reconfigure it at runtime.
 func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.Option) (*Host, error) {
 	in := newChannelInbound(64)
 	h := &Host{inbound: in, agentID: agentID}
+	h.curCorr.Store("")
+	if mg, ok := cfg.Gateway.(*mutableGateway); ok {
+		h.gw = mg
+	}
 
-	// The approver asks the user over the bus (an approval-request report) and
-	// blocks the cognitive loop until the answer is demuxed back in onMessage.
+	// Approval asks the user over the bus and blocks the loop until the answer is
+	// demuxed back in onMessage.
 	h.approver = newBusApprover(
-		func(corr, desc string) {
-			h.sendReport(context.Background(), corr, DefaultTaskID, markApprovalRequest(desc))
-		},
+		func(corr, desc string) { h.send(context.Background(), corr, Frame{Kind: kindApproval, Text: desc}) },
 		func() string { return fmt.Sprintf("appr-%d", h.corr.Add(1)) },
 	)
+
+	// Stream deltas and per-turn usage back to the user, tagged with the turn the
+	// worker is currently on (set before each Handle; same goroutine).
+	cfg.Approver = h.approver
+	cfg.OnDelta = func(d string) { h.send(context.Background(), h.turnCorr(), Frame{Kind: kindDelta, Text: d}) }
+	cfg.OnUsage = func(u llm.Usage) {
+		h.send(context.Background(), h.turnCorr(), Frame{Kind: kindUsage, Text: usageLine(u)})
+	}
+	// Tool/delegation trace — observability, off by default, gated by /trace so no
+	// bus traffic (and no possibly-large tool output) flows unless asked for.
+	cfg.OnTool = func(name, args, result string) {
+		if !h.traceOn.Load() {
+			return
+		}
+		h.send(context.Background(), h.turnCorr(), Frame{
+			Kind: kindTrace,
+			Cmd:  name,
+			Arg:  preview(args, 200),
+			Text: preview(result, 600),
+		})
+	}
 
 	opts := append([]mesh.Option{mesh.WithOnMessage(h.onMessage)}, nodeOpts...)
 	node := mesh.NewNode(agentID, opts...)
 	h.node = node
 	h.reportSubject = node.Options.ReportSubject
 
-	cfg.Inbound = in
-	cfg.Approver = h.approver
 	agent, err := New(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -91,57 +108,109 @@ func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.O
 	return h, nil
 }
 
-// onMessage demuxes an inbound bus message: an approval answer (its
-// CorrelationID matches a pending approval) wakes the blocked approver and is NOT
-// forwarded to the brain; anything else is a user turn pushed to the brain's
-// Inbound.
-func (h *Host) onMessage(m protocol.Message) {
-	if m.CorrelationID != "" && h.approver.resolve(m.CorrelationID, isApproveAnswer(m.Payload)) {
-		return // it was an approval answer
-	}
-	h.inbound.push(m)
+func (h *Host) turnCorr() string {
+	s, _ := h.curCorr.Load().(string)
+	return s
 }
 
-// Run connects the node (inbox subscription + registration) and processes
-// inbound messages serially until ctx is cancelled. Each converged reply — and
-// each turn-level error — reports back over the bus, paired by CorrelationID.
+// onMessage demuxes a bus frame. Approval answers wake the approver; read-only
+// control commands are handled here (concurrent-safe); user turns and the
+// history-mutating reset/system controls are pushed to the worker.
+func (h *Host) onMessage(m protocol.Message) {
+	f, ok := decodeFrame(m.Payload)
+	if !ok {
+		h.inbound.push(m) // foreign/raw message — treat as a turn
+		return
+	}
+	switch f.Kind {
+	case kindAnswer:
+		h.approver.resolve(m.CorrelationID, strings.EqualFold(strings.TrimSpace(f.Text), approveWord))
+	case kindCtrl:
+		if isWorkerCtrl(f.Cmd) {
+			h.inbound.push(m) // serialize with turns on the worker
+			return
+		}
+		h.send(context.Background(), m.CorrelationID, Frame{Kind: kindCtrl, Text: h.runCtrl(context.Background(), f.Cmd, f.Arg)})
+	default: // kindSay or anything else: a user turn
+		h.inbound.push(m)
+	}
+}
+
+// Run drains inbound and drives the brain serially until ctx is cancelled.
 func (h *Host) Run(ctx context.Context) error {
 	nodeErr := make(chan error, 1)
 	go func() { nodeErr <- h.node.Run(ctx) }()
 
 	for {
-		reply, err := h.agent.Brain.Step(ctx)
+		msg, err := h.inbound.recv(ctx)
 		if err != nil {
-			if ctx.Err() != nil {
-				break // shutting down
-			}
-			slog.Error("chat: turn failed", "err", err)
-			last := h.inbound.last
-			h.sendReport(ctx, last.CorrelationID, last.TaskID, "error: "+err.Error())
+			break // ctx done
+		}
+		f, _ := decodeFrame(msg.Payload)
+		h.curCorr.Store(msg.CorrelationID)
+
+		if f.Kind == kindCtrl { // worker control: reset / system
+			h.send(ctx, msg.CorrelationID, Frame{Kind: kindCtrl, Text: h.runWorkerCtrl(f.Cmd, f.Arg)})
 			continue
 		}
-		last := h.inbound.last
-		h.sendReport(ctx, last.CorrelationID, last.TaskID, reply)
+
+		text := string(msg.Payload)
+		if f.Kind == kindSay {
+			text = f.Text
+		}
+		reply, err := h.agent.Brain.Handle(ctx, protocol.Message{
+			Type:    protocol.TypeP2P,
+			Sender:  "user",
+			TaskID:  taskOr(msg.TaskID),
+			Payload: []byte(text),
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			slog.Error("chat: turn failed", "err", err)
+			h.send(ctx, msg.CorrelationID, Frame{Kind: kindError, Text: err.Error()})
+			continue
+		}
+		h.send(ctx, msg.CorrelationID, Frame{Kind: kindReply, Text: reply, Done: true})
 	}
 	return <-nodeErr
 }
 
-// sendReport publishes a message to the control plane's report subject, tagged
-// with the given correlation id and task id.
-func (h *Host) sendReport(ctx context.Context, corr, taskID, text string) {
+// send publishes a frame to the control plane's report subject, paired by corr.
+func (h *Host) send(ctx context.Context, corr string, f Frame) {
 	rep := protocol.Message{
 		ID:            fmt.Sprintf("rep-%d", time.Now().UnixNano()),
 		Sender:        h.agentID,
 		Type:          protocol.TypeReport,
 		CorrelationID: corr,
-		TaskID:        taskID,
-		Payload:       []byte(text),
+		Payload:       encodeFrame(f),
 		Timestamp:     time.Now().Unix(),
 	}
 	if err := h.node.SendRaw(ctx, h.reportSubject, rep); err != nil {
-		slog.Error("chat: failed to report", "err", err)
+		slog.Error("chat: failed to send frame", "err", err)
 	}
 }
 
 // Close releases the agent's resources.
 func (h *Host) Close() error { return h.agent.Close() }
+
+func taskOr(t string) string {
+	if t == "" {
+		return DefaultTaskID
+	}
+	return t
+}
+
+func usageLine(u llm.Usage) string {
+	return fmt.Sprintf("tokens: in=%d out=%d total=%d", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+}
+
+// preview truncates s to n runes for a trace line, marking elision.
+func preview(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}

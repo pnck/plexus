@@ -75,8 +75,10 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.Options.OnReport != nil {
 			var report protocol.Message
 			if err := json.Unmarshal(m.Data, &report); err == nil {
-				// Execute callback in a non-blocking goroutine
-				go s.Options.OnReport(report)
+				// Called synchronously on the subscription's dispatcher so reports
+				// are delivered in publish order (streamed chat frames depend on it).
+				// OnReport must not block — push to a buffered channel and return.
+				s.Options.OnReport(report)
 			} else {
 				slog.Error("Failed to unmarshal report", "err", err)
 			}

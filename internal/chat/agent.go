@@ -27,14 +27,15 @@ type Config struct {
 	// Approver gates approval-required effectors; nil denies all (DenyApprover).
 	// The bus host supplies the interactive /approve /deny approver.
 	Approver brain.Approver
-	// Inbound is the brain's structured-message intake. Nil means the in-process
-	// Handle() path only; the bus host (host.go) supplies a channel-backed Inbound
-	// so the brain can be driven by NATS via Brain.Step.
-	Inbound brain.Inbound
 	// IncludeRunCommand registers the run_command effector (ExecArbitrary,
 	// approval-gated). Off by default — the approval-free primitives cover
 	// ordinary work; arbitrary shell is opt-in.
 	IncludeRunCommand bool
+	// OnDelta / OnUsage / OnTool are the brain's live sinks (host wires them to the
+	// bus). Optional.
+	OnDelta func(string)
+	OnUsage func(llm.Usage)
+	OnTool  func(name, args, result string)
 }
 
 // Agent is a fully assembled chat agent: an LLM gateway, the built-in effector
@@ -42,8 +43,11 @@ type Config struct {
 // seeded with the chat role card and a task-channel that rejects task_* (chat's
 // standing task is an open-ended pseudo-task). It owns its SQLite connection.
 type Agent struct {
-	Brain *brain.Brain
-	db    *sql.DB
+	Brain         *brain.Brain
+	Registry      *effector.Registry        // exposed for the /tools control command
+	Checkpoints   *store.CheckpointStore    // exposed for the /steps control command
+	WorkingMemory *store.WorkingMemoryStore // exposed for the /memory control command
+	db            *sql.DB
 }
 
 // New assembles an Agent. It opens one brain-private SQLite connection shared by
@@ -96,10 +100,18 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		RoleCard: roleCard,
 		Approver: approver,
 		Emitter:  rejectEmitter{}, // chat rejects task_* (open-ended pseudo-task)
-		Inbound:  cfg.Inbound,     // nil for the in-process Handle path; set by the bus host
+		OnDelta:  cfg.OnDelta,
+		OnUsage:  cfg.OnUsage,
+		OnTool:   cfg.OnTool,
 	})
 
-	return &Agent{Brain: b, db: db}, nil
+	return &Agent{
+		Brain:         b,
+		Registry:      reg,
+		Checkpoints:   checkpoints,
+		WorkingMemory: workingMemory,
+		db:            db,
+	}, nil
 }
 
 // Handle runs one user turn through the brain under the standing chat task, and

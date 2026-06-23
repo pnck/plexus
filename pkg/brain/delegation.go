@@ -48,7 +48,8 @@ func runDelegation(ctx context.Context, gateway llm.Provider, caps effector.Capa
 		if err := ctx.Err(); err != nil {
 			return Result{Summary: "delegation cancelled", OpenQuestions: err.Error()}
 		}
-		text, calls, err := stream(ctx, gateway, history, tools)
+		// A delegation does not stream to the user; pass nil and ignore usage.
+		text, calls, _, err := stream(ctx, gateway, history, tools, nil)
 		if err != nil {
 			return Result{Summary: "delegation gateway error", OpenQuestions: err.Error()}
 		}
