@@ -137,6 +137,12 @@ func distill(text string) Result {
 			return r
 		}
 	}
+	if trimmed == "" {
+		// Light non-empty guarantee (§5.7.7 verify-at-boundary): a delegation that
+		// converged with no text still owes the parent a Result it can reason about
+		// — never a silent empty one the parent would absorb as a blank tool result.
+		return Result{Summary: "(delegation produced no distilled output)"}
+	}
 	return Result{Summary: trimmed}
 }
 

@@ -288,6 +288,21 @@ func TestDelegationOutOfEnvelopeFedBack(t *testing.T) {
 	}
 }
 
+// distill must never hand the parent an empty Result (§5.7.7 verify-at-boundary):
+// a delegation that converges with no text still yields a non-empty distillation.
+func TestDistillGuaranteesNonEmpty(t *testing.T) {
+	if r := distill("   \n  "); resultEmpty(r) {
+		t.Fatal("distill of blank text returned an empty Result the parent would absorb as blank")
+	}
+	if r := distill("did the thing"); r.Summary != "did the thing" {
+		t.Fatalf("distill Summary = %q, want the text", r.Summary)
+	}
+	// A JSON object shaped to the ReturnSpec is used directly.
+	if r := distill(`{"summary":"surveyed 3 files"}`); r.Summary != "surveyed 3 files" {
+		t.Fatalf("distill JSON Summary = %q", r.Summary)
+	}
+}
+
 // Test 5: authority layering — inbound from different source channels lands in
 // the right L-layer.
 func TestAuthorityStamping(t *testing.T) {

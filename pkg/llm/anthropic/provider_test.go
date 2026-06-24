@@ -52,6 +52,28 @@ func TestToAnthropicMessagesToolUseAndThinkingReplay(t *testing.T) {
 	}
 }
 
+// The stable system prefix (kernel + role card) carries an ephemeral cache
+// breakpoint on its LAST block only, so Anthropic serves tools+system from cache.
+func TestSystemPrefixCacheControl(t *testing.T) {
+	_, system := toAnthropicMessages([]llm.Message{
+		{Role: llm.RoleSystem, Content: "kernel principles"},
+		{Role: llm.RoleSystem, Content: "role card"},
+		{Role: llm.RoleUser, Content: "hi"},
+	})
+	if len(system) != 2 {
+		t.Fatalf("system blocks = %d, want 2", len(system))
+	}
+	last, _ := json.Marshal(system[len(system)-1])
+	if !contains(string(last), "cache_control") || !contains(string(last), "ephemeral") {
+		t.Fatalf("last system block missing ephemeral cache_control: %s", last)
+	}
+	// Only the last block carries the breakpoint (one cache point for the prefix).
+	first, _ := json.Marshal(system[0])
+	if contains(string(first), "cache_control") {
+		t.Fatalf("only the last system block should be cache-marked: %s", first)
+	}
+}
+
 func contains(s, sub string) bool { return idx(s, sub) >= 0 }
 func idx(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {

@@ -205,6 +205,14 @@ func toAnthropicMessages(msgs []llm.Message) ([]anthropic.MessageParam, []anthro
 			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false)))
 		}
 	}
+	// Cache the stable system prefix (kernel principles + role card): it is constant
+	// across a session, so an ephemeral cache breakpoint on the LAST system block
+	// lets Anthropic serve tools+system from cache and bill the prefix at cache
+	// rates. compose() keeps this prefix append-only / deterministic (role card
+	// first, frames immutable) — i.e. caching-ready by construction.
+	if len(systemBlocks) > 0 {
+		systemBlocks[len(systemBlocks)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
 	return anthropicMsgs, systemBlocks
 }
 
