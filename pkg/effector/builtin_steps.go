@@ -42,7 +42,6 @@ func StepAdd(cs *store.CheckpointStore) Effector {
 	return define(spec{
 		Name:    "step_add",
 		Desc:    "Add a step (goal) to the end of your plan; returns its seq. The ordered chain is your plan.",
-		Risk:    Write,
 		Private: true,
 	}, func(ctx context.Context, in stepAddArgs) (Result, error) {
 		if cs == nil {
@@ -69,7 +68,6 @@ func StepStart(cs *store.CheckpointStore) Effector {
 	return define(spec{
 		Name:    "step_start",
 		Desc:    "Mark a step active (begin working it).",
-		Risk:    Write,
 		Private: true,
 	}, func(ctx context.Context, in stepSeqArgs) (Result, error) {
 		if cs == nil {
@@ -93,7 +91,6 @@ func StepComplete(cs *store.CheckpointStore) Effector {
 	return define(spec{
 		Name:    "step_complete",
 		Desc:    "Mark an active step done, recording its distilled result.",
-		Risk:    Write,
 		Private: true,
 	}, func(ctx context.Context, in stepCompleteArgs) (Result, error) {
 		if cs == nil {
@@ -112,7 +109,6 @@ func StepBlock(cs *store.CheckpointStore) Effector {
 	return define(spec{
 		Name:    "step_block",
 		Desc:    "Mark an active step blocked.",
-		Risk:    Write,
 		Private: true,
 	}, func(ctx context.Context, in stepSeqArgs) (Result, error) {
 		if cs == nil {
@@ -131,7 +127,6 @@ func StepList(cs *store.CheckpointStore) Effector {
 	return define(spec{
 		Name:    "step_list",
 		Desc:    "List your plan: the ordered steps with their status and goal.",
-		Risk:    Read,
 		Private: true,
 	}, func(ctx context.Context, _ noArgs) (Result, error) {
 		if cs == nil {

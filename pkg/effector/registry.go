@@ -73,10 +73,11 @@ func (r *Registry) RequiresApproval(name string) bool {
 // DelegationEnvelope returns the mediated capability handle (能力封套) for a
 // delegation. It exposes ONLY the approval-free, shareable subset of the
 // registry: EXCLUDED are every approval-required effector (per the registry
-// policy) and every agent-private effector (memory; see AgentPrivate), while
-// approval-free contained exec (ExecSandboxed: build / test / lint) is INCLUDED
-// so the delegation can self-verify inside its sandbox (§5.7.4). Filtering on
-// RequiresApproval excludes ExecArbitrary and includes ExecSandboxed without any
+// policy — i.e. whose effects exceed the permitted set) and every agent-private
+// effector (memory; see AgentPrivate), while approval-free contained exec
+// (exec.boxed: build / test / lint) is INCLUDED so the delegation can self-verify
+// inside its sandbox (§5.7.4). Filtering on RequiresApproval (a subset test on
+// effects) excludes exec.arbitrary and includes exec.boxed without any
 // name-matching; the AgentPrivate check keeps a delegation from gaining
 // persistent memory (§5.7.7). The handle is a snapshot taken at call time.
 func (r *Registry) DelegationEnvelope() Capabilities {

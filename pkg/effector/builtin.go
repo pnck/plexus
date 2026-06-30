@@ -22,9 +22,9 @@ import (
 // spec states a primitive's identity declaratively. Named fields keep each
 // declaration self-documenting at the call site.
 type spec struct {
-	Name string  // unique tool id surfaced to the LLM
-	Desc string  // model-facing description
-	Risk RiskTag // side-effect tier (drives approval policy)
+	Name    string    // unique tool id surfaced to the LLM
+	Desc    string    // model-facing description
+	Effects EffectSet // observable-consequence set (drives approval policy); zero = ∅ (internal cognition)
 	// Private excludes the effector from the delegation envelope even when it is
 	// approval-free — memory is private because a delegation holds none (§5.7.7).
 	Private bool
@@ -39,7 +39,7 @@ type builtin struct {
 
 func (b *builtin) Name() string            { return b.spec.Name }
 func (b *builtin) Description() string     { return b.spec.Desc }
-func (b *builtin) Risk() RiskTag           { return b.spec.Risk }
+func (b *builtin) Effects() EffectSet      { return b.spec.Effects }
 func (b *builtin) AgentPrivate() bool      { return b.spec.Private }
 func (b *builtin) Schema() json.RawMessage { return b.schema }
 func (b *builtin) Invoke(ctx context.Context, args json.RawMessage) (Result, error) {

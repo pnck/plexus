@@ -13,15 +13,15 @@ import (
 
 // fakeEffector is a minimal Effector for policy/envelope tests.
 type fakeEffector struct {
-	name string
-	risk RiskTag
-	out  Result
-	err  error
+	name    string
+	effects EffectSet
+	out     Result
+	err     error
 }
 
 func (f fakeEffector) Name() string            { return f.name }
 func (f fakeEffector) Description() string     { return "fake " + f.name }
-func (f fakeEffector) Risk() RiskTag           { return f.risk }
+func (f fakeEffector) Effects() EffectSet      { return f.effects }
 func (f fakeEffector) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (f fakeEffector) Invoke(context.Context, json.RawMessage) (Result, error) {
 	return f.out, f.err
@@ -34,11 +34,11 @@ func TestDefaultPolicy(t *testing.T) {
 		eff  Effector
 		want bool
 	}{
-		{"read auto-allowed", fakeEffector{name: "read_file", risk: Read}, false},
-		{"write auto-allowed", fakeEffector{name: "write_file", risk: Write}, false},
-		{"sandboxed exec auto-allowed", fakeEffector{name: "run_tests", risk: ExecSandboxed}, false},
-		{"contained build exec auto-allowed", fakeEffector{name: "build", risk: ExecSandboxed}, false},
-		{"arbitrary exec requires approval", fakeEffector{name: "run_command", risk: ExecArbitrary}, true},
+		{"read auto-allowed", fakeEffector{name: "read_file", effects: NewEffectSet(FSRead)}, false},
+		{"write auto-allowed", fakeEffector{name: "write_file", effects: NewEffectSet(FSWrite)}, false},
+		{"sandboxed exec auto-allowed", fakeEffector{name: "run_tests", effects: NewEffectSet(ExecBoxed)}, false},
+		{"contained build exec auto-allowed", fakeEffector{name: "build", effects: NewEffectSet(ExecBoxed)}, false},
+		{"arbitrary exec requires approval", fakeEffector{name: "run_command", effects: NewEffectSet(ExecArbitrary)}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -58,21 +58,21 @@ func TestPolicyFuncOverride(t *testing.T) {
 		}
 		return DefaultPolicy{}.RequiresApproval(e)
 	})
-	if !p.RequiresApproval(fakeEffector{name: "write_secret", risk: Write}) {
+	if !p.RequiresApproval(fakeEffector{name: "write_secret", effects: NewEffectSet(FSWrite)}) {
 		t.Fatal("override should gate write_secret")
 	}
-	if p.RequiresApproval(fakeEffector{name: "build", risk: ExecSandboxed}) {
+	if p.RequiresApproval(fakeEffector{name: "build", effects: NewEffectSet(ExecBoxed)}) {
 		t.Fatal("sandboxed exec should remain approval-free under override")
 	}
-	if !p.RequiresApproval(fakeEffector{name: "run_command", risk: ExecArbitrary}) {
+	if !p.RequiresApproval(fakeEffector{name: "run_command", effects: NewEffectSet(ExecArbitrary)}) {
 		t.Fatal("arbitrary exec should still require approval")
 	}
 }
 
 func TestRegistryBasics(t *testing.T) {
 	r := NewRegistry(nil) // defaults to DefaultPolicy
-	r.Register(fakeEffector{name: "read_file", risk: Read})
-	r.Register(fakeEffector{name: "run_command", risk: ExecArbitrary})
+	r.Register(fakeEffector{name: "read_file", effects: NewEffectSet(FSRead)})
+	r.Register(fakeEffector{name: "run_command", effects: NewEffectSet(ExecArbitrary)})
 
 	if _, ok := r.Get("read_file"); !ok {
 		t.Fatal("expected read_file registered")
@@ -104,10 +104,10 @@ func TestDelegationEnvelopeFiltering(t *testing.T) {
 	// ExecSandboxed is approval-free and INCLUDED; ExecArbitrary is gated and
 	// EXCLUDED.
 	r := NewRegistry(nil)
-	r.Register(fakeEffector{name: "read_file", risk: Read})                                             // approval-free -> included
-	r.Register(fakeEffector{name: "write_scratch", risk: Write})                                        // approval-free write -> included
-	r.Register(fakeEffector{name: "run_command", risk: ExecArbitrary})                                  // approval-required arbitrary exec -> excluded
-	r.Register(fakeEffector{name: "contained_test", risk: ExecSandboxed, out: Result{Content: "PASS"}}) // approval-free sandboxed exec -> included
+	r.Register(fakeEffector{name: "read_file", effects: NewEffectSet(FSRead)})                                       // approval-free -> included
+	r.Register(fakeEffector{name: "write_scratch", effects: NewEffectSet(FSWrite)})                                  // approval-free write -> included
+	r.Register(fakeEffector{name: "run_command", effects: NewEffectSet(ExecArbitrary)})                              // approval-required arbitrary exec -> excluded
+	r.Register(fakeEffector{name: "contained_test", effects: NewEffectSet(ExecBoxed), out: Result{Content: "PASS"}}) // approval-free sandboxed exec -> included
 
 	env := r.DelegationEnvelope()
 
@@ -160,8 +160,8 @@ func TestBuiltinReadFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	rf := ReadFile()
-	if rf.Risk() != Read {
-		t.Fatalf("read_file risk=%v want Read", rf.Risk())
+	if rf.Effects() != NewEffectSet(FSRead) {
+		t.Fatalf("read_file risk=%v want Read", rf.Effects())
 	}
 	args, _ := json.Marshal(map[string]string{"path": path})
 	res, err := rf.Invoke(context.Background(), args)
@@ -185,8 +185,8 @@ func TestBuiltinReadFile(t *testing.T) {
 
 func TestBuiltinRunCommand(t *testing.T) {
 	rc := RunCommand()
-	if rc.Risk() != ExecArbitrary {
-		t.Fatalf("run_command risk=%v want ExecArbitrary", rc.Risk())
+	if rc.Effects() != NewEffectSet(ExecArbitrary) {
+		t.Fatalf("run_command risk=%v want ExecArbitrary", rc.Effects())
 	}
 	args, _ := json.Marshal(map[string]any{"command": "echo", "args": []string{"plexus"}})
 	res, err := rc.Invoke(context.Background(), args)
@@ -229,25 +229,25 @@ func (f fakeMCPClient) ListTools(context.Context) ([]mcp.ToolInfo, error) {
 }
 
 func TestMCPAdapterRiskTagging(t *testing.T) {
-	risks := RiskMap{"read_doc": Read, "edit_doc": Write}
+	risks := EffectMap{"read_doc": NewEffectSet(FSRead), "edit_doc": NewEffectSet(FSWrite)}
 
 	// Known tools get their configured tag.
-	if got := risks.RiskFor("read_doc"); got != Read {
+	if got := risks.EffectsFor("read_doc"); got != NewEffectSet(FSRead) {
 		t.Fatalf("read_doc risk=%v want Read", got)
 	}
-	if got := risks.RiskFor("edit_doc"); got != Write {
+	if got := risks.EffectsFor("edit_doc"); got != NewEffectSet(FSWrite) {
 		t.Fatalf("edit_doc risk=%v want Write", got)
 	}
 	// Unknown tool defaults to ExecArbitrary (highest tier) for safety.
-	if got := risks.RiskFor("mystery"); got != ExecArbitrary {
+	if got := risks.EffectsFor("mystery"); got != NewEffectSet(ExecArbitrary) {
 		t.Fatalf("unknown tool risk=%v want ExecArbitrary (default)", got)
 	}
 
 	// Adapter wires info -> Effector and forwards to the client.
 	info := mcp.ToolInfo{Name: "mystery", Description: "?", InputSchema: json.RawMessage(`{"type":"object"}`)}
-	eff := &mcpEffector{info: info, risk: risks.RiskFor(info.Name), client: fakeMCPClient{res: mcp.ToolResult{Content: "ok"}}}
-	if eff.Name() != "mystery" || eff.Risk() != ExecArbitrary {
-		t.Fatalf("adapter name/risk wrong: %s/%v", eff.Name(), eff.Risk())
+	eff := &mcpEffector{info: info, effects: risks.EffectsFor(info.Name), client: fakeMCPClient{res: mcp.ToolResult{Content: "ok"}}}
+	if eff.Name() != "mystery" || eff.Effects() != NewEffectSet(ExecArbitrary) {
+		t.Fatalf("adapter name/risk wrong: %s/%v", eff.Name(), eff.Effects())
 	}
 	res, err := eff.Invoke(context.Background(), nil)
 	if err != nil || res.Content != "ok" {
@@ -255,7 +255,7 @@ func TestMCPAdapterRiskTagging(t *testing.T) {
 	}
 
 	// Tool-level MCP error surfaces as Result.IsError.
-	effErr := &mcpEffector{info: info, risk: ExecArbitrary, client: fakeMCPClient{res: mcp.ToolResult{Content: "boom", IsError: true}}}
+	effErr := &mcpEffector{info: info, effects: NewEffectSet(ExecArbitrary), client: fakeMCPClient{res: mcp.ToolResult{Content: "boom", IsError: true}}}
 	res, err = effErr.Invoke(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("tool-level error should not be a Go error: %v", err)
@@ -265,14 +265,14 @@ func TestMCPAdapterRiskTagging(t *testing.T) {
 	}
 }
 
-// AdaptTool wires an mcp.ToolInfo + client + RiskMap into a working Effector:
+// AdaptTool wires an mcp.ToolInfo + client + EffectMap into a working Effector:
 // name/description/schema pass through, the risk comes from the map (unknown ->
 // ExecArbitrary), and Invoke forwards to the client.
 func TestAdaptTool(t *testing.T) {
 	info := mcp.ToolInfo{Name: "read_doc", Description: "read a doc", InputSchema: json.RawMessage(`{"type":"object"}`)}
 	client := fakeMCPClient{res: mcp.ToolResult{Content: "DOC"}}
 
-	eff := AdaptTool(info, client, RiskMap{"read_doc": Read})
+	eff := AdaptTool(info, client, EffectMap{"read_doc": NewEffectSet(FSRead)})
 	if eff.Name() != "read_doc" {
 		t.Fatalf("name=%q", eff.Name())
 	}
@@ -282,22 +282,22 @@ func TestAdaptTool(t *testing.T) {
 	if string(eff.Schema()) != `{"type":"object"}` {
 		t.Fatalf("schema=%q", eff.Schema())
 	}
-	if eff.Risk() != Read {
-		t.Fatalf("risk=%v want Read", eff.Risk())
+	if eff.Effects() != NewEffectSet(FSRead) {
+		t.Fatalf("risk=%v want Read", eff.Effects())
 	}
 	res, err := eff.Invoke(context.Background(), nil)
 	if err != nil || res.Content != "DOC" {
 		t.Fatalf("invoke res=%+v err=%v", res, err)
 	}
 
-	// A tool absent from the RiskMap defaults to ExecArbitrary (highest tier).
-	if got := AdaptTool(mcp.ToolInfo{Name: "mystery"}, client, RiskMap{}).Risk(); got != ExecArbitrary {
+	// A tool absent from the EffectMap defaults to ExecArbitrary (highest tier).
+	if got := AdaptTool(mcp.ToolInfo{Name: "mystery"}, client, EffectMap{}).Effects(); got != NewEffectSet(ExecArbitrary) {
 		t.Fatalf("unknown-tool risk=%v want ExecArbitrary", got)
 	}
 
 	// A transport/protocol error from the client surfaces as a Go error (distinct
 	// from a tool-level Result.IsError).
-	transportErr := AdaptTool(info, fakeMCPClient{err: errors.New("conn reset")}, RiskMap{})
+	transportErr := AdaptTool(info, fakeMCPClient{err: errors.New("conn reset")}, EffectMap{})
 	if _, err := transportErr.Invoke(context.Background(), nil); err == nil {
 		t.Fatal("expected transport error to surface as a Go error")
 	}
@@ -314,7 +314,7 @@ func TestRegisterMCPClient(t *testing.T) {
 		},
 		res: mcp.ToolResult{Content: "ok"},
 	}
-	risks := RiskMap{"read_doc": Read} // "danger" is unknown -> ExecArbitrary
+	risks := EffectMap{"read_doc": NewEffectSet(FSRead)} // "danger" is unknown -> ExecArbitrary
 
 	reg := NewRegistry(nil)
 	out, err := RegisterMCPClient(context.Background(), reg, client, risks)
@@ -327,12 +327,12 @@ func TestRegisterMCPClient(t *testing.T) {
 
 	// Both tools are registered and carry the right risk tag.
 	rd, ok := reg.Get("read_doc")
-	if !ok || rd.Risk() != Read {
-		t.Fatalf("read_doc: ok=%v risk=%v", ok, rd.Risk())
+	if !ok || rd.Effects() != NewEffectSet(FSRead) {
+		t.Fatalf("read_doc: ok=%v risk=%v", ok, rd.Effects())
 	}
 	dg, ok := reg.Get("danger")
-	if !ok || dg.Risk() != ExecArbitrary {
-		t.Fatalf("danger: ok=%v risk=%v want ExecArbitrary", ok, dg.Risk())
+	if !ok || dg.Effects() != NewEffectSet(ExecArbitrary) {
+		t.Fatalf("danger: ok=%v risk=%v want ExecArbitrary", ok, dg.Effects())
 	}
 
 	// Risk tags drive approval: ExecArbitrary gates, Read does not.

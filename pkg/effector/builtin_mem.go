@@ -28,7 +28,6 @@ func MemWrite(wm *store.WorkingMemoryStore) Effector {
 	return define(spec{
 		Name:    "mem_write",
 		Desc:    "Save a distilled reminder to working memory under a key (recall later with mem_read). Does not enter context automatically.",
-		Risk:    Write,
 		Private: true,
 	}, func(ctx context.Context, in memWriteArgs) (Result, error) {
 		if wm == nil {
@@ -55,7 +54,6 @@ func MemRead(wm *store.WorkingMemoryStore) Effector {
 	return define(spec{
 		Name:    "mem_read",
 		Desc:    "Recall working memory: pass a key for that reminder, or omit it to list all reminders in scope.",
-		Risk:    Read,
 		Private: true,
 	}, func(ctx context.Context, in memReadArgs) (Result, error) {
 		if wm == nil {
@@ -101,7 +99,6 @@ func LtmGet() Effector {
 	return define(spec{
 		Name:    "ltm_get",
 		Desc:    "Query long-term (cross-task) memory. NOT IMPLEMENTED yet.",
-		Risk:    Read,
 		Private: true,
 	}, func(context.Context, ltmGetArgs) (Result, error) {
 		return toolErr("%v", ErrLongTermMemoryNotImplemented), nil
@@ -119,7 +116,6 @@ func LtmPut() Effector {
 	return define(spec{
 		Name:    "ltm_put",
 		Desc:    "Store distilled cross-task experience to long-term memory. NOT IMPLEMENTED yet.",
-		Risk:    Write,
 		Private: true,
 	}, func(context.Context, ltmPutArgs) (Result, error) {
 		return toolErr("%v", ErrLongTermMemoryNotImplemented), nil

@@ -39,9 +39,9 @@ type readFileArgs struct {
 // [offset, offset+length), clamped to the file's bounds.
 func ReadFile() Effector {
 	return define(spec{
-		Name: "read_file",
-		Desc: "Read a file. Optionally read just a byte range via offset/length (e.g. an offset from search) instead of the whole file.",
-		Risk: Read,
+		Name:    "read_file",
+		Desc:    "Read a file. Optionally read just a byte range via offset/length (e.g. an offset from search) instead of the whole file.",
+		Effects: NewEffectSet(FSRead),
 	}, func(_ context.Context, in readFileArgs) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
@@ -65,9 +65,9 @@ func ReadFile() Effector {
 // Stat returns the built-in stat effector (RiskTag Read).
 func Stat() Effector {
 	return define(spec{
-		Name: "stat",
-		Desc: "Report a path's size, mode, mtime and type; reports exists=false instead of erroring when absent.",
-		Risk: Read,
+		Name:    "stat",
+		Desc:    "Report a path's size, mode, mtime and type; reports exists=false instead of erroring when absent.",
+		Effects: NewEffectSet(FSRead),
 	}, func(_ context.Context, in pathArg) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
@@ -87,9 +87,9 @@ func Stat() Effector {
 // ListDir returns the built-in list_dir effector (RiskTag Read).
 func ListDir() Effector {
 	return define(spec{
-		Name: "list_dir",
-		Desc: "List the entries of a directory (name, type, size).",
-		Risk: Read,
+		Name:    "list_dir",
+		Desc:    "List the entries of a directory (name, type, size).",
+		Effects: NewEffectSet(FSRead),
 	}, func(_ context.Context, in pathArg) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
@@ -124,9 +124,9 @@ type globArgs struct {
 // Glob returns the built-in glob effector (RiskTag Read).
 func Glob() Effector {
 	return define(spec{
-		Name: "glob",
-		Desc: "Find files matching a shell glob pattern via path/filepath.",
-		Risk: Read,
+		Name:    "glob",
+		Desc:    "Find files matching a shell glob pattern via path/filepath.",
+		Effects: NewEffectSet(FSRead),
 	}, func(_ context.Context, in globArgs) (Result, error) {
 		if in.Pattern == "" {
 			return toolErr("missing required argument: pattern"), nil
@@ -158,9 +158,9 @@ type searchArgs struct {
 // can read/edit that exact location.
 func Search() Effector {
 	return define(spec{
-		Name: "search",
-		Desc: "Search file contents by regular expression under a path. Reports each match as `path:line:@offset: text`; the @offset byte position feeds read_file (offset/length) and edit_file (start/end).",
-		Risk: Read,
+		Name:    "search",
+		Desc:    "Search file contents by regular expression under a path. Reports each match as `path:line:@offset: text`; the @offset byte position feeds read_file (offset/length) and edit_file (start/end).",
+		Effects: NewEffectSet(FSRead),
 	}, func(_ context.Context, in searchArgs) (Result, error) {
 		if in.Pattern == "" {
 			return toolErr("missing required argument: pattern"), nil
@@ -245,9 +245,9 @@ type writeFileArgs struct {
 // WriteFile returns the built-in write_file effector (RiskTag Write).
 func WriteFile() Effector {
 	return define(spec{
-		Name: "write_file",
-		Desc: "Write content to a regular file (mode overwrite|append).",
-		Risk: Write,
+		Name:    "write_file",
+		Desc:    "Write content to a regular file (mode overwrite|append).",
+		Effects: NewEffectSet(FSWrite),
 	}, func(_ context.Context, in writeFileArgs) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
@@ -301,9 +301,9 @@ type editFileArgs struct {
 // old_string with surrounding context.
 func EditFile() Effector {
 	return define(spec{
-		Name: "edit_file",
-		Desc: "Replace an exact string in a file. old_string must be unique (or set replace_all). Optionally confine to a byte range [start, end) — e.g. a search offset — to target one specific occurrence.",
-		Risk: Write,
+		Name:    "edit_file",
+		Desc:    "Replace an exact string in a file. old_string must be unique (or set replace_all). Optionally confine to a byte range [start, end) — e.g. a search offset — to target one specific occurrence.",
+		Effects: NewEffectSet(FSWrite),
 	}, func(_ context.Context, in editFileArgs) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
@@ -375,9 +375,9 @@ func clamp(v, lo, hi int) int {
 // MakeDir returns the built-in make_dir effector (RiskTag Write).
 func MakeDir() Effector {
 	return define(spec{
-		Name: "make_dir",
-		Desc: "Create a directory and any missing parents (mkdir -p).",
-		Risk: Write,
+		Name:    "make_dir",
+		Desc:    "Create a directory and any missing parents (mkdir -p).",
+		Effects: NewEffectSet(FSWrite),
 	}, func(_ context.Context, in pathArg) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil
@@ -397,9 +397,9 @@ type moveFileArgs struct {
 // MoveFile returns the built-in move_file effector (RiskTag Write).
 func MoveFile() Effector {
 	return define(spec{
-		Name: "move_file",
-		Desc: "Rename or move a file or directory from source to dest.",
-		Risk: Write,
+		Name:    "move_file",
+		Desc:    "Rename or move a file or directory from source to dest.",
+		Effects: NewEffectSet(FSWrite),
 	}, func(_ context.Context, in moveFileArgs) (Result, error) {
 		if in.Source == "" || in.Dest == "" {
 			return toolErr("move_file requires source and dest"), nil
@@ -416,9 +416,9 @@ func MoveFile() Effector {
 // VCS, so it is approval-free.
 func RemoveFile() Effector {
 	return define(spec{
-		Name: "remove_file",
-		Desc: "Delete a regular file (refuses directories).",
-		Risk: Write,
+		Name:    "remove_file",
+		Desc:    "Delete a regular file (refuses directories).",
+		Effects: NewEffectSet(FSWrite),
 	}, func(_ context.Context, in pathArg) (Result, error) {
 		if in.Path == "" {
 			return toolErr("missing required argument: path"), nil

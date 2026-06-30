@@ -21,9 +21,9 @@ type runCommandArgs struct {
 // routes it through approval and the delegation envelope excludes it.
 func RunCommand() Effector {
 	return define(spec{
-		Name: "run_command",
-		Desc: "Execute a command and return its combined stdout/stderr.",
-		Risk: ExecArbitrary,
+		Name:    "run_command",
+		Desc:    "Execute a command and return its combined stdout/stderr.",
+		Effects: NewEffectSet(ExecArbitrary),
 	}, func(ctx context.Context, in runCommandArgs) (Result, error) {
 		if in.Command == "" {
 			return toolErr("missing required argument: command"), nil

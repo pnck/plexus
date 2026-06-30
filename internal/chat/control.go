@@ -186,7 +186,7 @@ func (h *Host) listTools() string {
 		if h.agent.Registry.RequiresApproval(e.Name()) {
 			gate = " [approval]"
 		}
-		fmt.Fprintf(&b, "%-14s %-13s %s%s\n", e.Name(), e.Risk(), e.Description(), gate)
+		fmt.Fprintf(&b, "%-14s %-13s %s%s\n", e.Name(), e.Effects(), e.Description(), gate)
 	}
 	fmt.Fprintf(&b, "[%d tools]", len(effs))
 	return b.String()
