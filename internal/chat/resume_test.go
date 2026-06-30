@@ -25,7 +25,7 @@ import (
 // SQLite checkpoint store is a file shared by both incarnations.
 func TestCrossProcessYieldResume(t *testing.T) {
 	port := freePort(t)
-	jsStore := t.TempDir()                          // persistent JetStream store (outlives the agent)
+	jsStore := t.TempDir()                           // persistent JetStream store (outlives the agent)
 	dbPath := filepath.Join(t.TempDir(), "brain.db") // persistent brain checkpoint store
 	url := "nats://127.0.0.1:" + strconv.Itoa(port)
 

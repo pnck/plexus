@@ -16,12 +16,16 @@ import (
 // YieldError is returned by Handle/Resume when the cognitive loop suspended a step
 // awaiting an external answer (the durable Yield-for-Approval of §5.7.5). The
 // caller (the bus host) emits the ask tagged with Corr, parks, and later calls
-// Resume(corr, granted) when the answer arrives over the durable inbox. It is a
-// control signal, not a failure — the synchronous Approver path never produces it.
+// Resume(corr, granted, note) when the answer arrives over the durable inbox. It
+// is a control signal, not a failure — the synchronous Approver path never produces it.
 type YieldError struct {
 	Corr        string // CorrelationID the suspended step waits on (answer pairs back on it)
 	Description string // human-facing ask (e.g. "run_command wants to run: …")
 	TaskID      string // the task whose step is suspended
+	// Effects is the gated call's observable-consequence set (E3.4). The host /
+	// control plane uses it to route the ask by required authority up the
+	// supervisory chain (worker→manager→VP); the brain itself only yields/resumes.
+	Effects effector.EffectSet
 }
 
 func (e *YieldError) Error() string {
@@ -379,6 +383,10 @@ func (b *Brain) needsApproval(call llm.ToolCall) bool {
 func (b *Brain) suspendForApproval(ctx context.Context, calls []llm.ToolCall, idx int) (*YieldError, error) {
 	call := calls[idx]
 	corr := b.newCorrID()
+	// Capture the REAL active-step goal (if any) BEFORE ensureActiveStep, so the
+	// approver sees the agent's declared intent as context — or "(no step declared)"
+	// when there is none. We never fabricate it from the synthesized suspend step.
+	stepGoal := b.activeStepGoal(ctx)
 	seq, err := b.ensureActiveStep(ctx, "awaiting approval: "+call.Name)
 	if err != nil {
 		return nil, err
@@ -389,9 +397,34 @@ func (b *Brain) suspendForApproval(ctx context.Context, calls []llm.ToolCall, id
 	b.pending = &pendingYield{corr: corr, taskID: b.currentTask, calls: calls, idx: idx}
 	return &YieldError{
 		Corr:        corr,
-		Description: approvalDescription(call),
+		Description: approvalDescription(call, stepGoal),
 		TaskID:      b.currentTask,
+		Effects:     b.callEffects(call.Name),
 	}, nil
+}
+
+// callEffects returns the observable-consequence set of a registered effector
+// (empty for brain-owned tools / unknown names) — E3.4 routing payload.
+func (b *Brain) callEffects(name string) effector.EffectSet {
+	if b.reg == nil {
+		return effector.EffectSet{}
+	}
+	if e, ok := b.reg.Get(name); ok {
+		return e.Effects()
+	}
+	return effector.EffectSet{}
+}
+
+// activeStepGoal returns the current task's active-step goal as approval context,
+// or "" when none is declared (the absence is itself a signal to the approver).
+func (b *Brain) activeStepGoal(ctx context.Context) string {
+	if b.checkpoints == nil {
+		return ""
+	}
+	if cp, ok, err := b.checkpoints.Active(ctx, b.currentTask); err == nil && ok {
+		return cp.Goal
+	}
+	return ""
 }
 
 // ensureActiveStep returns the seq of the current task's Active step, creating one
@@ -425,9 +458,15 @@ func (b *Brain) absorbToolResult(call llm.ToolCall, content string) {
 	})
 }
 
-// approvalDescription renders the human-facing ask for a gated call.
-func approvalDescription(call llm.ToolCall) string {
-	return fmt.Sprintf("%s wants to run: %s", call.Name, call.Arguments)
+// approvalDescription renders the human-facing ask for a gated call: the gated
+// call plus the declared step goal as context (D4). The goal does NOT gate — it
+// is informational; the gate is purely the effect-vs-permitted test. Absent a
+// declared step it says so rather than fabricating one.
+func approvalDescription(call llm.ToolCall, stepGoal string) string {
+	if stepGoal == "" {
+		stepGoal = "(no step declared)"
+	}
+	return fmt.Sprintf("step goal: %s\nrequests: %s wants to run: %s", stepGoal, call.Name, call.Arguments)
 }
 
 // Resume wakes a step suspended by a yield (§5.7.5): it activates the checkpoint(s)
@@ -436,7 +475,12 @@ func approvalDescription(call llm.ToolCall) string {
 // decision and finishes the turn. A fresh brain (the suspending process died; this
 // one has only seed history) instead rebuilds working context from the persisted
 // step chain and re-enters, per §5.7.9. Resume may itself yield again.
-func (b *Brain) Resume(ctx context.Context, corr string, granted bool) (string, error) {
+//
+// note is an optional message from the approver (E3.4): a denial rationale or an
+// executable condition (e.g. "use the staging DB instead"). It is fed back to the
+// model as context — richer than a bare grant/deny, which is what makes an agent
+// approver (manager) more useful than a human's yes/no.
+func (b *Brain) Resume(ctx context.Context, corr string, granted bool, note string) (string, error) {
 	if b.checkpoints == nil {
 		return "", fmt.Errorf("brain has no checkpoint store; cannot resume")
 	}
@@ -458,7 +502,7 @@ func (b *Brain) Resume(ctx context.Context, corr string, granted bool) (string, 
 		b.pending = nil
 		b.currentTask = py.taskID
 		gated := py.calls[py.idx]
-		content := b.decideGatedCall(ctx, gated, granted)
+		content := b.decideGatedCall(ctx, gated, granted, note)
 		if b.onTool != nil {
 			b.onTool(gated.Name, gated.Arguments, content)
 		}
@@ -469,14 +513,15 @@ func (b *Brain) Resume(ctx context.Context, corr string, granted bool) (string, 
 		return b.run(ctx)
 	}
 	// Rebuild resume: a fresh brain reconstructs context from the step chain.
-	return b.resumeFromCheckpoints(ctx, waiters[0].TaskID, granted)
+	return b.resumeFromCheckpoints(ctx, waiters[0].TaskID, granted, note)
 }
 
 // decideGatedCall runs the previously-gated effector if approval was granted, or
 // returns the standing denial message if not (fed back to the model, never a crash).
-func (b *Brain) decideGatedCall(ctx context.Context, call llm.ToolCall, granted bool) string {
+// note (approver rationale/condition, E3.4) is appended either way.
+func (b *Brain) decideGatedCall(ctx context.Context, call llm.ToolCall, granted bool, note string) string {
 	if !granted {
-		return fmt.Sprintf("DENIED: %q requires human approval and it was not granted. Do not retry; either choose a different approach or report that human approval is needed.", call.Name)
+		return fmt.Sprintf("DENIED: %q requires human approval and it was not granted.%s Do not retry; either choose a different approach or report that human approval is needed.", call.Name, approverNote(note))
 	}
 	eff, ok := b.reg.Get(call.Name)
 	if !ok {
@@ -490,7 +535,15 @@ func (b *Brain) decideGatedCall(ctx context.Context, call llm.ToolCall, granted 
 	if res.IsError {
 		return "tool error: " + res.Content
 	}
-	return res.Content
+	return res.Content + approverNote(note)
+}
+
+// approverNote renders an optional approver note as a trailing context clause.
+func approverNote(note string) string {
+	if note == "" {
+		return ""
+	}
+	return " (approver note: " + note + ")"
 }
 
 // resumeFromCheckpoints rebuilds a fresh brain's working context from the task's
@@ -498,7 +551,7 @@ func (b *Brain) decideGatedCall(ctx context.Context, call llm.ToolCall, granted 
 // from steps + working memory, never by replaying history). The granted decision
 // for the step that was awaiting approval is folded into the rebuilt context as L2
 // user-authority data so the model continues from the human's answer.
-func (b *Brain) resumeFromCheckpoints(ctx context.Context, taskID string, granted bool) (string, error) {
+func (b *Brain) resumeFromCheckpoints(ctx context.Context, taskID string, granted bool, note string) (string, error) {
 	b.currentTask = taskID
 	steps, err := b.checkpoints.Steps(ctx, taskID)
 	if err != nil {
@@ -509,15 +562,15 @@ func (b *Brain) resumeFromCheckpoints(ctx context.Context, taskID string, grante
 		Authority:  protocol.AuthUser, // the resume briefing carries the human's answer (L2)
 		Provenance: "resume",
 		Role:       llm.RoleUser,
-		Content:    rebuildBriefing(taskID, steps, granted),
+		Content:    rebuildBriefing(taskID, steps, granted, note),
 	})
 	return b.run(ctx)
 }
 
 // rebuildBriefing renders the resume context from the step chain: completed steps
 // (goal + distilled result) for continuity, the active step that was awaiting the
-// answer, and the human's granted/denied decision.
-func rebuildBriefing(taskID string, steps []store.Checkpoint, granted bool) string {
+// answer, the granted/denied decision, and any approver note (E3.4).
+func rebuildBriefing(taskID string, steps []store.Checkpoint, granted bool, note string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Resuming task %q after an interruption. Progress so far (from the durable step chain):\n", taskID)
 	for _, s := range steps {
@@ -531,7 +584,7 @@ func rebuildBriefing(taskID string, steps []store.Checkpoint, granted bool) stri
 	if !granted {
 		decision = "DENIED"
 	}
-	fmt.Fprintf(&sb, "The action you were waiting on for the active step was %s by the human. Continue the task from here.", decision)
+	fmt.Fprintf(&sb, "The action you were waiting on for the active step was %s by the approver.%s Continue the task from here.", decision, approverNote(note))
 	return sb.String()
 }
 

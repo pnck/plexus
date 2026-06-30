@@ -254,7 +254,9 @@ func (h *Host) resumeTurn(ctx context.Context, msg protocol.Message, f Frame) {
 	}
 	h.curCorr.Store(origin)
 	reply, err, interrupted := h.drive(ctx, func(tctx context.Context) (string, error) {
-		return h.agent.Brain.Resume(tctx, corr, granted)
+		// note is empty for chat: a human REPL answers a bare /approve|/deny. The
+		// approver note (E3.4) carries a manager's rationale/condition in the cluster.
+		return h.agent.Brain.Resume(tctx, corr, granted, "")
 	})
 	if err != nil && !interrupted && ctx.Err() == nil {
 		if _, isYield := brain.AsYield(err); !isYield && strings.Contains(err.Error(), "no suspended step") {

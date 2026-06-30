@@ -22,7 +22,7 @@ func taskMsg(task, text string) protocol.Message {
 // ExecArbitrary) whose Invoke records and returns a fixed result (no real exec).
 func gatedReg(called *bool) *effector.Registry {
 	reg := effector.NewRegistry(nil)
-	reg.Register(recordingEffector{name: "run_command", risk: effector.ExecArbitrary, out: "EXEC-OK", called: called})
+	reg.Register(recordingEffector{name: "run_command", effects: effector.NewEffectSet(effector.ExecArbitrary), out: "EXEC-OK", called: called})
 	return reg
 }
 
@@ -77,7 +77,7 @@ func TestYieldPreciseResumeGranted(t *testing.T) {
 		t.Fatalf("want 1 suspended waiter, got %d", len(waiters))
 	}
 
-	out, err := b.Resume(context.Background(), "corr-1", true)
+	out, err := b.Resume(context.Background(), "corr-1", true, "")
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestYieldPreciseResumeDenied(t *testing.T) {
 	if _, err := b.Handle(context.Background(), taskMsg("task-1", "delete everything")); err == nil {
 		t.Fatal("expected a yield")
 	}
-	out, err := b.Resume(context.Background(), "corr-1", false)
+	out, err := b.Resume(context.Background(), "corr-1", false, "")
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestYieldFreshBrainRebuildResume(t *testing.T) {
 		YieldForApproval: true, NewCorrID: constCorr("corr-2"),
 	})
 
-	out, err := b2.Resume(context.Background(), "corr-1", true)
+	out, err := b2.Resume(context.Background(), "corr-1", true, "")
 	if err != nil {
 		t.Fatalf("fresh Resume: %v", err)
 	}
