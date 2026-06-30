@@ -27,12 +27,14 @@ func (h *Host) runWorkerCtrl(cmd, arg string) string {
 		return "history cleared"
 	case cmdSystem:
 		if arg == "" { // no-arg = get (read-only; does not reset history)
-			if rc := h.agent.Brain.RoleCard(); rc.SystemPrompt != "" {
-				return rc.SystemPrompt
+			if rc := h.agent.Brain.RoleCard(); !rc.IsZero() {
+				return rc.RenderSystemPrompt()
 			}
 			return "(no system prompt set)"
 		}
-		h.agent.Brain.SetRoleCard(brain.RoleCard{SystemPrompt: arg})
+		// A raw `/system <text>` is a freeform override: it goes in Guidance, which
+		// RenderSystemPrompt renders verbatim when it is the only field set.
+		h.agent.Brain.SetRoleCard(brain.RoleCard{Guidance: arg})
 		return "system prompt set; history reset"
 	default:
 		return fmt.Sprintf("unknown control command %q", cmd)

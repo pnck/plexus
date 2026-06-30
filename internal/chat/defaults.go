@@ -6,7 +6,12 @@
 // generic framework stays in pkg/*; only the chat-specific defaults live here.
 package chat
 
-import "plexus/pkg/brain"
+import (
+	_ "embed"
+	"fmt"
+
+	"plexus/pkg/brain"
+)
 
 // DefaultTaskID is the standing pseudo-task every chat turn is scoped to. plexus
 // has no session concept; a chat is a single, non-persisted conversation, so a
@@ -14,21 +19,22 @@ import "plexus/pkg/brain"
 // memory (§5.7.10 / decision 2026-06-23).
 const DefaultTaskID = "chat"
 
-// defaultSystemPrompt frames the standing pseudo-task: open-ended assistance with
-// no completion criterion. Because the task can never be "done" or "failed",
-// task_report/task_revert do not apply in chat — they are rejected by the
-// emitter (see emitter.go). This is the chat role card, layered at L1 AFTER the
-// kernel principles (§5.7.11) which the brain seeds itself.
-const defaultSystemPrompt = `You are Plexus, assisting a user in an open-ended chat session.
+// chatRoleCardYAML is the chat role card as a real on-disk YAML, embedded so chat
+// goes through the SAME parse path (brain.ParseRoleCard) a cluster instance uses
+// for brain.LoadRoleCard (E3.3 dogfood). It frames the standing pseudo-task:
+// open-ended assistance with no completion criterion, so task_report/task_revert
+// do not apply (they are rejected by the emitter, see emitter.go).
+//
+//go:embed rolecards/chat.yaml
+var chatRoleCardYAML []byte
 
-Your standing task is simply to participate in the discussion and help with the
-user's needs. This task has no fixed completion criterion: it is never "done" and
-never "failed", so do not try to report or revert it.
-
-Be direct and concise. Use your tools to inspect and act on the user's workspace
-when it helps; delegate self-contained, noisy sub-work; keep your own context clean.`
-
-// DefaultRoleCard returns the chat agent's role card.
+// DefaultRoleCard returns the chat agent's role card, parsed from the embedded
+// YAML. A parse failure is a programmer error (the asset ships with the binary),
+// so it panics rather than returning an error.
 func DefaultRoleCard() brain.RoleCard {
-	return brain.RoleCard{SystemPrompt: defaultSystemPrompt}
+	rc, err := brain.ParseRoleCard(chatRoleCardYAML, "embedded chat.yaml")
+	if err != nil {
+		panic(fmt.Sprintf("chat: embedded role card invalid: %v", err))
+	}
+	return rc
 }

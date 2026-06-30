@@ -101,16 +101,16 @@ func userMsg(text string) protocol.Message {
 
 // recordingEffector tracks invocation and returns a fixed result.
 type recordingEffector struct {
-	name   string
-	risk   effector.RiskTag
-	out    string
-	called *bool
+	name    string
+	effects effector.EffectSet
+	out     string
+	called  *bool
 }
 
-func (e recordingEffector) Name() string            { return e.name }
-func (e recordingEffector) Description() string     { return "rec " + e.name }
-func (e recordingEffector) Risk() effector.RiskTag  { return e.risk }
-func (e recordingEffector) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (e recordingEffector) Name() string                { return e.name }
+func (e recordingEffector) Description() string         { return "rec " + e.name }
+func (e recordingEffector) Effects() effector.EffectSet { return e.effects }
+func (e recordingEffector) Schema() json.RawMessage     { return json.RawMessage(`{"type":"object"}`) }
 func (e recordingEffector) Invoke(context.Context, json.RawMessage) (effector.Result, error) {
 	if e.called != nil {
 		*e.called = true
@@ -125,14 +125,14 @@ func (e recordingEffector) Invoke(context.Context, json.RawMessage) (effector.Re
 func TestBrainEffectorThenFinal(t *testing.T) {
 	called := false
 	reg := effector.NewRegistry(nil)
-	reg.Register(recordingEffector{name: "read_file", risk: effector.Read, out: "FILE-CONTENTS", called: &called})
+	reg.Register(recordingEffector{name: "read_file", effects: effector.NewEffectSet(effector.FSRead), out: "FILE-CONTENTS", called: &called})
 
 	gw := &fakeGateway{turns: []scriptedTurn{
 		{calls: []llm.ToolCall{{ID: "c1", Name: "read_file", Arguments: `{"path":"/x"}`}}},
 		{text: "done: I read the file"},
 	}}
 
-	b := New(Options{Gateway: gw, Registry: reg, RoleCard: RoleCard{SystemPrompt: "you are a dev agent"}})
+	b := New(Options{Gateway: gw, Registry: reg, RoleCard: RoleCard{Name: "Dev", Summary: "a dev agent."}})
 	out, err := b.Handle(context.Background(), userMsg("read /x please"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -159,7 +159,7 @@ func TestBrainEffectorThenFinal(t *testing.T) {
 // back to the model and the loop continues (no crash).
 func TestBrainApprovalDenied(t *testing.T) {
 	reg := effector.NewRegistry(nil)
-	reg.Register(recordingEffector{name: "run_command", risk: effector.ExecArbitrary, out: "ran"})
+	reg.Register(recordingEffector{name: "run_command", effects: effector.NewEffectSet(effector.ExecArbitrary), out: "ran"})
 
 	var approvalAsked bool
 	approver := FuncApprover(func(context.Context, effector.Effector, json.RawMessage) (bool, error) {
@@ -329,15 +329,15 @@ func TestAuthorityStamping(t *testing.T) {
 func TestRoleCardSeedsL1(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "role.yaml")
-	if err := os.WriteFile(path, []byte("system_prompt: |\n  I am the Dev agent.\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("name: Dev\nsummary: the Dev agent.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sp, err := LoadRoleCard(path)
 	if err != nil {
 		t.Fatalf("LoadRoleCard: %v", err)
 	}
-	if !strings.Contains(sp.SystemPrompt, "Dev agent") {
-		t.Fatalf("unexpected system prompt: %q", sp.SystemPrompt)
+	if !strings.Contains(sp.RenderSystemPrompt(), "Dev agent") {
+		t.Fatalf("unexpected system prompt: %q", sp.RenderSystemPrompt())
 	}
 
 	b := New(Options{Gateway: &fakeGateway{}, RoleCard: sp})

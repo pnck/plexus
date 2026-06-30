@@ -39,7 +39,8 @@ var chatCmd = &cobra.Command{
 
 		var roleCard brain.RoleCard
 		if chatSystem != "" {
-			roleCard = brain.RoleCard{SystemPrompt: chatSystem}
+			// --system is a freeform prompt override: Guidance renders verbatim.
+			roleCard = brain.RoleCard{Guidance: chatSystem}
 		}
 
 		// Only SIGTERM tears the session down. Ctrl-C (SIGINT) must NOT cancel the

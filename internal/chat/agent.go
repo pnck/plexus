@@ -87,17 +87,28 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("chat: working memory store: %w", err)
 	}
 
-	reg := effector.NewRegistry(nil)
+	roleCard := cfg.RoleCard
+	if roleCard.IsZero() {
+		roleCard = DefaultRoleCard()
+	}
+	// Gating policy from the role card's effect grant (E3.3): a non-empty permitted
+	// set -> PermittedPolicy; empty (the chat default) -> DefaultPolicy = today's
+	// behavior (run_command gated, the rest auto-allowed).
+	permitted, err := roleCard.PermittedSet()
+	if err != nil {
+		return nil, fmt.Errorf("chat: role card permitted: %w", err)
+	}
+	var policy effector.Policy // nil -> DefaultPolicy in NewRegistry
+	if !permitted.IsEmpty() {
+		policy = effector.PermittedPolicy{Permitted: permitted}
+	}
+	reg := effector.NewRegistry(policy)
 	effector.RegisterBuiltins(reg, effector.BuiltinOptions{
 		WorkingMemory:     workingMemory,
 		Checkpoints:       checkpoints,
 		IncludeRunCommand: cfg.IncludeRunCommand,
 	})
 
-	roleCard := cfg.RoleCard
-	if roleCard.SystemPrompt == "" {
-		roleCard = DefaultRoleCard()
-	}
 	var approver brain.Approver = brain.DenyApprover{}
 	if cfg.Approver != nil {
 		approver = cfg.Approver

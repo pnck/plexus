@@ -74,7 +74,7 @@ func (f FuncApprover) RequestApproval(ctx context.Context, eff effector.Effector
 type Brain struct {
 	gateway            llm.Provider
 	reg                *effector.Registry
-	roleCard           RoleCard // structured role card; its SystemPrompt seeds an L1 frame (after the kernel)
+	roleCard           RoleCard // structured role card; RenderSystemPrompt() seeds an L1 frame (after the kernel)
 	emitter            Emitter  // outbound seam to the control plane (task_* events, §5.7.10)
 	history            []Frame  // in-memory working transcript; the durable plan lives in the CheckpointStore (§5.7.9)
 	currentTask        string   // TaskID of the message being handled; scopes effectors and task_report
@@ -220,12 +220,12 @@ func (b *Brain) seed() {
 		Role:       llm.RoleSystem,
 		Content:    principlesPrompt,
 	})
-	if b.roleCard.SystemPrompt != "" {
+	if rendered := b.roleCard.RenderSystemPrompt(); rendered != "" {
 		b.history = append(b.history, Frame{
 			Authority:  protocol.AuthSystem,
 			Provenance: "role_card",
 			Role:       llm.RoleSystem,
-			Content:    b.roleCard.SystemPrompt,
+			Content:    rendered,
 		})
 	}
 }
