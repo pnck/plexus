@@ -74,6 +74,34 @@ func TestSystemPrefixCacheControl(t *testing.T) {
 	}
 }
 
+// A long-enough conversation gets a SECOND, rolling cache breakpoint on the
+// message two back from the tail (llm.CacheBreakpoints), so the conversation
+// prefix — not just the system prefix — is served from cache, while the freshest
+// tail stays out of the cached write.
+func TestRollingCacheControl(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: "kernel"},
+		{Role: llm.RoleSystem, Content: "role card"},
+		{Role: llm.RoleUser, Content: "do a thing"},   // out[0]
+		{Role: llm.RoleAssistant, Content: "working"}, // out[1] <- rolling breakpoint (msgs idx 3)
+		{Role: llm.RoleUser, Content: "any update?"},  // out[2] <- freshest tail, NOT cached
+	}
+	out, system := toAnthropicMessages(msgs)
+
+	last, _ := json.Marshal(system[len(system)-1])
+	if !contains(string(last), "cache_control") {
+		t.Fatalf("system prefix breakpoint missing: %s", last)
+	}
+	roll, _ := json.Marshal(out[1])
+	if !contains(string(roll), "cache_control") || !contains(string(roll), "ephemeral") {
+		t.Fatalf("rolling breakpoint missing on the assistant message: %s", roll)
+	}
+	tail, _ := json.Marshal(out[len(out)-1])
+	if contains(string(tail), "cache_control") {
+		t.Fatalf("the freshest tail message must not be cache-marked: %s", tail)
+	}
+}
+
 func contains(s, sub string) bool { return idx(s, sub) >= 0 }
 func idx(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {

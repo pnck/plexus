@@ -2,7 +2,10 @@ package openai
 
 import (
 	"context"
+	"hash/fnv"
+	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	"plexus/pkg/llm"
@@ -152,6 +155,13 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 	if e := openaiEffort(p.reasoningEffort); e != "" {
 		params.ReasoningEffort = shared.ReasoningEffort(e)
 	}
+	// OpenAI caches prompt prefixes AUTOMATICALLY (no explicit breakpoints like
+	// Anthropic). A stable prompt_cache_key routes same-prefix requests to the same
+	// cache for a better hit rate; we scope it to the system prefix (the first
+	// shared breakpoint), which is constant across a session — see llm.CacheBreakpoints.
+	if key := systemPrefixCacheKey(msgs); key != "" {
+		params.PromptCacheKey = openai.String(key)
+	}
 
 	// Best-effort thinking opt-out for gateways that think by default. Sent as an
 	// extra body field (not a typed param) since it is a vendor extension.
@@ -170,6 +180,25 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 // including assistant tool-call turns and tool results. Extracted so the
 // mapping — in particular the tool_call_id pairing — is unit-testable without a
 // live endpoint.
+// systemPrefixCacheKey derives a stable prompt_cache_key from the conversation's
+// system prefix (kernel + role card), the first breakpoint llm.CacheBreakpoints
+// returns. OpenAI auto-caches prefixes, so this only routes same-prefix requests
+// to the same cache; it is constant across a session and changes when the role
+// card does (/system). Empty when there is no system prefix.
+func systemPrefixCacheKey(msgs []llm.Message) string {
+	bps := llm.CacheBreakpoints(msgs)
+	if len(bps) == 0 {
+		return ""
+	}
+	h := fnv.New64a()
+	for _, m := range msgs[:bps[0]+1] {
+		_, _ = io.WriteString(h, string(m.Role))
+		_, _ = io.WriteString(h, m.Content)
+		_, _ = h.Write([]byte{0})
+	}
+	return "plexus-" + strconv.FormatUint(h.Sum64(), 16)
+}
+
 func toOpenAIMessages(msgs []llm.Message) []openai.ChatCompletionMessageParamUnion {
 	var oaiMsgs []openai.ChatCompletionMessageParamUnion
 	for _, m := range msgs {

@@ -169,16 +169,36 @@ func (p *Provider) GenerateStream(ctx context.Context, msgs []llm.Message, tools
 // signed block precede the tool_use it produced), then text, then one tool_use
 // block per call. Tool results map to tool_result blocks on a user message.
 // Extracted so this structure is unit-testable without a live endpoint.
+//
+// Prompt caching: the breakpoints come from the provider-neutral
+// llm.CacheBreakpoints policy (the stable system prefix + a rolling conversation
+// prefix). For each breakpoint message we stamp an ephemeral cache_control on its
+// last block, so Anthropic serves that prefix from cache and bills it at cache
+// rates. compose() keeps the prefix append-only/deterministic — caching-ready by
+// construction — and the rolling breakpoint only ever moves forward.
 func toAnthropicMessages(msgs []llm.Message) ([]anthropic.MessageParam, []anthropic.TextBlockParam) {
+	bps := make(map[int]bool)
+	for _, i := range llm.CacheBreakpoints(msgs) {
+		bps[i] = true
+	}
+
 	var anthropicMsgs []anthropic.MessageParam
 	var systemBlocks []anthropic.TextBlockParam
 
-	for _, m := range msgs {
+	for i, m := range msgs {
 		switch m.Role {
 		case llm.RoleSystem:
-			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: m.Content})
+			tb := anthropic.TextBlockParam{Text: m.Content}
+			if bps[i] {
+				tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
+			systemBlocks = append(systemBlocks, tb)
 		case llm.RoleUser:
-			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+			um := anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content))
+			if bps[i] {
+				markCacheBreakpoint(&um)
+			}
+			anthropicMsgs = append(anthropicMsgs, um)
 		case llm.RoleAssistant:
 			var blocks []anthropic.ContentBlockParamUnion
 			// Signed thinking blocks must lead the assistant turn (replay rule).
@@ -200,20 +220,32 @@ func toAnthropicMessages(msgs []llm.Message) ([]anthropic.MessageParam, []anthro
 			if len(blocks) == 0 {
 				blocks = append(blocks, anthropic.NewTextBlock(""))
 			}
-			anthropicMsgs = append(anthropicMsgs, anthropic.NewAssistantMessage(blocks...))
+			am := anthropic.NewAssistantMessage(blocks...)
+			if bps[i] {
+				markCacheBreakpoint(&am)
+			}
+			anthropicMsgs = append(anthropicMsgs, am)
 		case llm.RoleTool:
-			anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false)))
+			tm := anthropic.NewUserMessage(anthropic.NewToolResultBlock(m.ToolCallID, m.Content, false))
+			if bps[i] {
+				markCacheBreakpoint(&tm)
+			}
+			anthropicMsgs = append(anthropicMsgs, tm)
 		}
 	}
-	// Cache the stable system prefix (kernel principles + role card): it is constant
-	// across a session, so an ephemeral cache breakpoint on the LAST system block
-	// lets Anthropic serve tools+system from cache and bill the prefix at cache
-	// rates. compose() keeps this prefix append-only / deterministic (role card
-	// first, frames immutable) — i.e. caching-ready by construction.
-	if len(systemBlocks) > 0 {
-		systemBlocks[len(systemBlocks)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
-	}
 	return anthropicMsgs, systemBlocks
+}
+
+// markCacheBreakpoint stamps an ephemeral prompt-cache breakpoint on the last
+// cache-capable content block of a message. Thinking blocks can't carry one, so it
+// scans back to the nearest block that can (a no-op if none does).
+func markCacheBreakpoint(m *anthropic.MessageParam) {
+	for i := len(m.Content) - 1; i >= 0; i-- {
+		if cc := m.Content[i].GetCacheControl(); cc != nil {
+			*cc = anthropic.NewCacheControlEphemeralParam()
+			return
+		}
+	}
 }
 
 // pendingThinkingBlock accumulates a thinking content block: its text arrives via
