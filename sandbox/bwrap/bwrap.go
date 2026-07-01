@@ -51,16 +51,13 @@ func (p *Provider) Enter(ticketPath string, extraArgs []string) error {
 		return fmt.Errorf("failed to extract embedded bwrap: %w", err)
 	}
 
-	bwrapArgs := []string{
-		bwrapPath,
-		"--ro-bind", "/", "/",
-		"--dev", "/dev",
-		"--proc", "/proc",
-		"--tmpfs", "/tmp",
-		"--unshare-all",
-		"--share-net",
-		"--bind", ticketPath, ticketPath,
-	}
+	// Isolation args come from the translation layer (E4.2). DefaultPolicy is
+	// behavior-preserving (== the former hardcoded set); E4.4 will pass a per-agent
+	// Policy instead. The ticket bind is the sandbox handshake (mechanism), not
+	// isolation policy, so it is appended here rather than in the Policy.
+	bwrapArgs := []string{bwrapPath}
+	bwrapArgs = append(bwrapArgs, Translate(DefaultPolicy())...)
+	bwrapArgs = append(bwrapArgs, "--bind", ticketPath, ticketPath)
 
 	if len(extraArgs) > 0 {
 		bwrapArgs = append(bwrapArgs, extraArgs...)
