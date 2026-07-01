@@ -53,6 +53,39 @@ func TestTranslateFaces(t *testing.T) {
 	}
 }
 
+// A hardened policy exercises the E4.3 boundary-vocabulary added on top of the
+// E4.2 shell: env curation (secret), cap-drop (exec/proc), net-off, chdir
+// (provision), user-ns + die-with-parent (ambient).
+func TestTranslateHardened(t *testing.T) {
+	got := Translate(Policy{
+		UnshareAll:    true, // net stays off: no ShareNet
+		Clearenv:      true,
+		Setenv:        []EnvVar{{Key: "PATH", Value: "/usr/bin"}, {Key: "HOME", Value: "/work"}},
+		CapDrop:       []string{"CAP_NET_RAW", "CAP_SYS_ADMIN"},
+		Chdir:         "/work",
+		UnshareUser:   true,
+		DieWithParent: true,
+	})
+	for _, want := range [][]string{
+		{"--unshare-all"},
+		{"--clearenv"},
+		{"--setenv", "PATH", "/usr/bin"},
+		{"--setenv", "HOME", "/work"},
+		{"--cap-drop", "CAP_NET_RAW"},
+		{"--cap-drop", "CAP_SYS_ADMIN"},
+		{"--chdir", "/work"},
+		{"--unshare-user"},
+		{"--die-with-parent"},
+	} {
+		if !containsSeq(got, want) {
+			t.Fatalf("hardened Translate missing %v in %v", want, got)
+		}
+	}
+	if contains(got, "--share-net") {
+		t.Fatalf("hardened policy must keep net off: %v", got)
+	}
+}
+
 func contains(s []string, x string) bool {
 	for _, v := range s {
 		if v == x {

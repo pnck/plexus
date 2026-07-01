@@ -14,13 +14,13 @@ func GenerateTicket() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("crypto rand failed: %w", err)
 	}
-	
+
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("plexus_sandbox_%x.ticket", b))
-	
+
 	if err := os.WriteFile(path, []byte("OK"), 0600); err != nil {
 		return "", fmt.Errorf("failed to write sandbox ticket to %s: %w", path, err)
 	}
-	
+
 	return path, nil
 }
 
@@ -30,10 +30,10 @@ func VerifyAndConsumeTicket(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read sandbox ticket (spoof attempt or stale env?): %w", err)
 	}
-	
+
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("failed to consume/delete sandbox ticket: %w", err)
 	}
-	
+
 	return nil
 }

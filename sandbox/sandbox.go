@@ -28,31 +28,31 @@ func EnterIfRequested(sandboxed bool, provider Provider, extraArgs []string) err
 	ticketPath := os.Getenv("PLEXUS_SANDBOX_TICKET")
 	if ticketPath == "" {
 		// --- HOST PHASE ---
-		
+
 		// 1. Generate one-time handover ticket
 		path, err := GenerateTicket()
 		if err != nil {
 			return fmt.Errorf("failed to generate sandbox ticket: %w", err)
 		}
-		
+
 		os.Setenv("PLEXUS_SANDBOX_TICKET", path)
-		
+
 		slog.Info("Hollowing out process and entering sandbox...", "provider", provider.Name(), "ticket", path)
-		
+
 		// Delegate to specific sandbox implementation
 		if err := provider.Enter(path, extraArgs); err != nil {
 			return fmt.Errorf("sandbox transition failed via %s: %w", provider.Name(), err)
 		}
-		
+
 		return nil
 	}
-	
+
 	// --- SANDBOX PHASE ---
-	
+
 	if err := VerifyAndConsumeTicket(ticketPath); err != nil {
 		return fmt.Errorf("FATAL: %w", err)
 	}
-	
+
 	slog.Info("[Sandbox] Verified deterministic entry into isolated environment!")
 	return nil
 }

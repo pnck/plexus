@@ -23,22 +23,40 @@ type Bind struct{ Src, Dest string }
 
 // Policy describes the isolation an agent's effector-host runs under. Build it from
 // DefaultPolicy (or a per-agent policy, E4.3); the zero value emits no arguments.
+// Fields are grouped by E4.1's three faces. NOTE: ROBinds/Binds serve both confine
+// (bind only what's needed) and provision (inject role card read-only / workspace
+// writable) — a mount is a mount; the face is intent, not a separate field.
 type Policy struct {
-	// ── confine ──
+	// ── confine (deny reach) ──
 	ROBinds    []Bind   // read-only mounts (--ro-bind); E0 default: {"/","/"} (whole rootfs)
 	Binds      []Bind   // read-write mounts (--bind); provision writable paths go here
 	Dev        []string // devtmpfs mounts (--dev)
 	Proc       []string // proc mounts (--proc)
 	Tmpfs      []string // tmpfs mounts (--tmpfs)
 	UnshareAll bool     // --unshare-all (net/pid/ipc/uts/cgroup/user)
+	UnshareNet bool     // --unshare-net (net-off for policies that do NOT UnshareAll)
 	// ShareNet re-exposes the network after UnshareAll. Net-off = UnshareAll &&
 	// !ShareNet. Fine-grained "bus reachable, internet denied" is NOT a single flag
-	// (net is non-binary, E4.1 §2) and lands in E4.3.
+	// (net is non-binary, E4.1 §2) — that lands later in E4.3.
 	ShareNet bool
+	Clearenv bool     // --clearenv (drop the inherited env; re-add only what's granted)
+	Setenv   []EnvVar // --setenv K V (secret face: only granted credentials)
+	CapDrop  []string // --cap-drop CAP (exec/proc face; e.g. CAP_NET_RAW, CAP_SYS_ADMIN)
 
-	// ── ambient ──
+	// ── provision (working dir into the injected workspace) ──
+	Chdir string // --chdir DIR
+
+	// ── ambient (global one-shot) ──
+	UnshareUser   bool // --unshare-user (identity; subsumed by UnshareAll but separable)
 	DieWithParent bool // --die-with-parent: never outlive the launcher (no orphan sandbox)
+
+	// NOTE (E4.3 pending, needs decisions): seccomp filter (--seccomp needs a compiled
+	// BPF fd — generation mechanism TBD), cgroup resource limits (NOT a bwrap arg —
+	// via setrlimit/cgroup v2), and "bus-only" netns. See tracking/E4 doc.
 }
+
+// EnvVar is one --setenv key/value the launcher grants into the sandbox.
+type EnvVar struct{ Key, Value string }
 
 // DefaultPolicy reproduces E0's former hardcoded bwrap args EXACTLY, so routing
 // Enter through Translate(DefaultPolicy()) is behavior-preserving. It is
@@ -77,11 +95,29 @@ func Translate(p Policy) []string {
 	if p.UnshareAll {
 		a = append(a, "--unshare-all")
 	}
+	if p.UnshareNet {
+		a = append(a, "--unshare-net")
+	}
 	if p.ShareNet {
 		a = append(a, "--share-net")
 	}
+	if p.UnshareUser {
+		a = append(a, "--unshare-user")
+	}
 	for _, b := range p.Binds {
 		a = append(a, "--bind", b.Src, b.Dest)
+	}
+	if p.Clearenv {
+		a = append(a, "--clearenv")
+	}
+	for _, e := range p.Setenv {
+		a = append(a, "--setenv", e.Key, e.Value)
+	}
+	for _, c := range p.CapDrop {
+		a = append(a, "--cap-drop", c)
+	}
+	if p.Chdir != "" {
+		a = append(a, "--chdir", p.Chdir)
 	}
 	if p.DieWithParent {
 		a = append(a, "--die-with-parent")
