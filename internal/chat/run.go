@@ -38,7 +38,8 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 
 	port := cfg.NatsPort
 	if port == 0 {
-		port = 4222
+		port = -1 // auto-assign a free port: no clash, no config. The actual
+		// address is read back from the server below and shown to the user.
 	}
 	agentID := cfg.AgentID
 	if agentID == "" {
@@ -63,7 +64,8 @@ func Run(parent context.Context, cfg RunConfig, in io.Reader, out io.Writer) err
 		return fmt.Errorf("chat: start embedded NATS: %w", err)
 	}
 	defer func() { ns.Shutdown(); ns.WaitForShutdown() }()
-	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
+	url := ns.ClientURL()
+	fmt.Fprintf(out, "\033[2mtrunk listening on %s\033[0m\n", ns.Addr())
 
 	// Readline-backed REPL client.
 	rl, err := readline.NewEx(&readline.Config{

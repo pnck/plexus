@@ -22,8 +22,8 @@ var (
 // watchCmd subscribes to the mesh's observability streams (sys.obs.<id>.<kind>)
 // and prints them — the standalone monitor for the "special" channels that carry
 // debug output (tool/delegation trace, raw LLM, logs) off the functional report
-// channel. Run it alongside `plexus chat` (which embeds NATS on the default
-// port) or against any mesh NATS. With no agent id it watches every agent.
+// channel. Run it against any trunk; `plexus chat` prints its trunk address on
+// startup (pass it to --trunk). With no agent id it watches every agent.
 var watchCmd = &cobra.Command{
 	Use:   "watch [agent-id]",
 	Short: "Watch agents' observability streams (sys.obs.*)",

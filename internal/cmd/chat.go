@@ -77,7 +77,7 @@ func init() {
 	chatCmd.Flags().StringVar(&chatBaseURL, "base-url", "", "Optional API base URL (env PLEXUS_LLM_BASE_URL)")
 	chatCmd.Flags().BoolVar(&chatDebug, "debug-llm", false, "Print raw LLM request body + response status")
 	chatCmd.Flags().StringVar(&chatReasoning, "reasoning", "", "Reasoning effort: minimal|low|medium|high|xhigh|max (mapped/clamped per provider; env PLEXUS_REASONING)")
-	chatCmd.Flags().IntVar(&chatTrunkPort, "trunk-port", 4222, "Port the embedded trunk (mesh bus) listens on")
+	chatCmd.Flags().IntVar(&chatTrunkPort, "trunk-port", 0, "Pin the embedded trunk (mesh bus) to a port; 0 auto-assigns a free one (printed at startup)")
 	chatCmd.Flags().BoolVar(&chatAllowExec, "allow-exec", false, "Enable the run_command effector (arbitrary shell; each call is approval-gated)")
 	chatCmd.Flags().BoolVar(&chatWithSandbox, "sandbox", false, "Run chat inside a strict bwrap sandbox (fs/namespace isolation)")
 }

@@ -131,7 +131,7 @@ _Excluded from `-tags nochat` builds._
 | `--system` | — | Override the default chat role card's system prompt. |
 | `--allow-exec` | `false` | Enable the `run_command` effector (arbitrary shell; each call is approval-gated). |
 | `--sandbox` | `false` | Run chat inside a strict bwrap sandbox (fs/namespace isolation). |
-| `--trunk-port` | `4222` | Port the embedded trunk (mesh bus) listens on. |
+| `--trunk-port` | _(auto)_ | Pin the embedded trunk to a port; unset auto-assigns a free one, printed at startup. |
 | `--debug-llm` | `false` | Print the raw LLM request body + response status. |
 
 ### `plexus watch [agent-id]`
@@ -200,7 +200,9 @@ Explicit flags take precedence over the corresponding environment variable.
 Agents publish debug output to `sys.obs.<agent-id>.<kind>` on the mesh, kept off the
 functional report channel. Kinds: `trace` (tool/delegation), `raw` (LLM), `deleg`
 (delegation), `thinking`, `log`. Tail them with [`plexus watch`](#plexus-watch-agent-id),
-or inside `chat` with `/trace on`.
+or inside `chat` with `/trace on`. A `chat` session prints its trunk address on startup
+(it auto-assigns a free port); pass that to `watch --trunk`, or pin it with
+`chat --trunk-port`.
 
 ## Sandboxing
 

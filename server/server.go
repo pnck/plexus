@@ -106,14 +106,16 @@ func (s *Server) Run(ctx context.Context) error {
 	// Wait for context cancellation
 	<-ctx.Done()
 	slog.Info("Server SDK shutting down...")
-	
+
 	return nil
 }
 
 // StartEmbeddedNATS spins up an in-process NATS server with JetStream enabled,
-// for local dev/testing. storeDir is the JetStream file-store root (durable across
-// a broker restart); pass an ephemeral temp dir for a non-persisted session.
-// Production environments should rely on a standalone NATS cluster.
+// for local dev/testing. port <= 0 auto-assigns a free port — read the actual
+// address back from the returned server's Addr() / ClientURL(). storeDir is the
+// JetStream file-store root (durable across a broker restart); pass an ephemeral
+// temp dir for a non-persisted session. Production environments should rely on a
+// standalone NATS cluster.
 func StartEmbeddedNATS(port int, storeDir string) (*natsserver.Server, error) {
 	opts := &natsserver.Options{
 		Host:      "127.0.0.1",
@@ -135,7 +137,7 @@ func StartEmbeddedNATS(port int, storeDir string) (*natsserver.Server, error) {
 		return nil, fmt.Errorf("embedded nats server failed to start within timeout")
 	}
 
-	slog.Info("Started embedded NATS server", "port", port)
+	slog.Info("Started embedded NATS server", "addr", ns.Addr())
 	return ns, nil
 }
 
@@ -143,7 +145,7 @@ func StartEmbeddedNATS(port int, storeDir string) (*natsserver.Server, error) {
 func (s *Server) GetRegisteredAgents() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	copied := make([]string, len(s.agents))
 	copy(copied, s.agents)
 	return copied
@@ -177,7 +179,7 @@ func (s *Server) SendP2P(ctx context.Context, agentID string, msg protocol.Messa
 func (s *Server) SendGroupBroadcast(ctx context.Context, group string, msg protocol.Message) error {
 	msg.Target = group
 	msg.Type = protocol.TypeBroadcast
-	
+
 	topic := s.Options.GroupPrefix + group
 	return s.send(ctx, topic, msg)
 }
@@ -186,7 +188,7 @@ func (s *Server) SendGroupBroadcast(ctx context.Context, group string, msg proto
 func (s *Server) SendGroupTask(ctx context.Context, group string, msg protocol.Message) error {
 	msg.Target = group
 	msg.Type = protocol.TypeQueueTask
-	
+
 	topic := s.Options.QueuePrefix + group
 	return s.send(ctx, topic, msg)
 }
