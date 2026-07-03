@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	watchNatsURL string
-	watchKind    string
+	watchTrunk string
+	watchKind  string
 )
 
 // watchCmd subscribes to the mesh's observability streams (sys.obs.<id>.<kind>)
@@ -39,9 +39,9 @@ var watchCmd = &cobra.Command{
 		}
 		subject := "sys.obs." + agent + "." + kind
 
-		nc, err := nats.Connect(watchNatsURL)
+		nc, err := nats.Connect(trunkURL(watchTrunk))
 		if err != nil {
-			return fmt.Errorf("watch: connect %s: %w", watchNatsURL, err)
+			return fmt.Errorf("watch: connect %s: %w", watchTrunk, err)
 		}
 		defer nc.Close()
 
@@ -58,7 +58,7 @@ var watchCmd = &cobra.Command{
 		}
 		defer func() { _ = sub.Unsubscribe() }()
 
-		fmt.Fprintf(os.Stderr, "watching %s on %s … (Ctrl-C to stop)\n", subject, watchNatsURL)
+		fmt.Fprintf(os.Stderr, "watching %s on %s … (Ctrl-C to stop)\n", subject, watchTrunk)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		<-ctx.Done()
@@ -68,6 +68,6 @@ var watchCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(watchCmd)
-	watchCmd.Flags().StringVar(&watchNatsURL, "nats-url", "nats://127.0.0.1:4222", "NATS URL of the mesh to watch")
+	watchCmd.Flags().StringVar(&watchTrunk, "trunk", "127.0.0.1:4222", "Trunk (mesh bus) address to watch, host:port")
 	watchCmd.Flags().StringVar(&watchKind, "kind", "", "Filter to one obs kind (trace|raw|deleg|thinking|log); default all")
 }

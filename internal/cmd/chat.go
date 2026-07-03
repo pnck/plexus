@@ -16,12 +16,12 @@ import (
 )
 
 var (
-	chatProvider  string
-	chatModel     string
-	chatSystem    string
-	chatBaseURL   string
-	chatDebug     bool
-	chatNatsPort  int
+	chatProvider    string
+	chatModel       string
+	chatSystem      string
+	chatBaseURL     string
+	chatDebug       bool
+	chatTrunkPort   int
 	chatAllowExec   bool
 	chatReasoning   string
 	chatWithSandbox bool
@@ -63,7 +63,7 @@ var chatCmd = &cobra.Command{
 		return chat.Run(ctx, chat.RunConfig{
 			Gateway:           gw,
 			RoleCard:          roleCard,
-			NatsPort:          chatNatsPort,
+			NatsPort:          chatTrunkPort,
 			IncludeRunCommand: chatAllowExec,
 		}, os.Stdin, os.Stdout)
 	},
@@ -77,7 +77,7 @@ func init() {
 	chatCmd.Flags().StringVar(&chatBaseURL, "base-url", "", "Optional API base URL (env PLEXUS_LLM_BASE_URL)")
 	chatCmd.Flags().BoolVar(&chatDebug, "debug-llm", false, "Print raw LLM request body + response status")
 	chatCmd.Flags().StringVar(&chatReasoning, "reasoning", "", "Reasoning effort: minimal|low|medium|high|xhigh|max (mapped/clamped per provider; env PLEXUS_REASONING)")
-	chatCmd.Flags().IntVar(&chatNatsPort, "nats-port", 4222, "Embedded NATS port")
+	chatCmd.Flags().IntVar(&chatTrunkPort, "trunk-port", 4222, "Port the embedded trunk (mesh bus) listens on")
 	chatCmd.Flags().BoolVar(&chatAllowExec, "allow-exec", false, "Enable the run_command effector (arbitrary shell; each call is approval-gated)")
-	chatCmd.Flags().BoolVar(&chatWithSandbox, "with-sandbox", false, "Run chat inside a strict bwrap sandbox (fs/namespace isolation)")
+	chatCmd.Flags().BoolVar(&chatWithSandbox, "sandbox", false, "Run chat inside a strict bwrap sandbox (fs/namespace isolation)")
 }

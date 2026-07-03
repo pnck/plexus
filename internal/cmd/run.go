@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	natsURL   string
+	trunkAddr string
 	agentID   string
 	sandboxed bool
 )
@@ -31,7 +31,7 @@ var runCmd = &cobra.Command{
 		defer cancel()
 
 		slog.Info("Starting plexus daemon", "id", agentID, "sandboxed", sandboxed)
-		a := mesh.NewNode(agentID, mesh.WithNatsURL(natsURL))
+		a := mesh.NewNode(agentID, mesh.WithNatsURL(trunkURL(trunkAddr)))
 
 		return a.Run(ctx)
 	},
@@ -39,7 +39,7 @@ var runCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(runCmd)
-	runCmd.Flags().StringVar(&natsURL, "nats-url", "nats://127.0.0.1:4222", "NATS server URL to connect to")
+	runCmd.Flags().StringVar(&trunkAddr, "trunk", "127.0.0.1:4222", "Trunk (mesh bus) address to connect to, host:port")
 	runCmd.Flags().StringVar(&agentID, "id", "agent-x", "Agent identity")
-	runCmd.Flags().BoolVar(&sandboxed, "sandboxed", false, "Run the daemon inside a strict bwrap sandbox")
+	runCmd.Flags().BoolVar(&sandboxed, "sandbox", false, "Run the daemon inside a strict bwrap sandbox")
 }

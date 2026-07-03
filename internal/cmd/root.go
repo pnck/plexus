@@ -2,10 +2,22 @@ package cmd
 
 import (
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"plexus/internal/logger"
 )
+
+// trunkURL normalizes a --trunk value (host:port, or a full URL) into the mesh
+// transport URL the bus client needs. The user-facing flag speaks "trunk" — the
+// backbone that carries the mesh's signals; the URL scheme is an internal transport
+// detail, so a bare host:port is accepted and the scheme is filled in here.
+func trunkURL(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	return "nats://" + addr
+}
 
 var debug bool
 
