@@ -2,87 +2,105 @@ package bwrap
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
-// DefaultPolicy must translate to E0's exact former hardcoded args, so routing
-// Enter through the translation layer (E4.2) is behavior-preserving.
-func TestDefaultPolicyBehaviorPreserving(t *testing.T) {
+// DefaultPolicy is the sensible chat/dev sandboxed default: the whole host rootfs
+// read-only, inherited env, plus the baked isolation invariants.
+func TestDefaultPolicy(t *testing.T) {
 	want := []string{
 		"--ro-bind", "/", "/",
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--tmpfs", "/tmp",
-		"--unshare-all",
-		"--share-net",
+		"--unshare-all", "--share-net",
+		"--cap-drop", "ALL",
+		"--die-with-parent",
 	}
 	if got := Translate(DefaultPolicy()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Translate(DefaultPolicy())=\n%v\nwant\n%v", got, want)
 	}
 }
 
-func TestTranslateFaces(t *testing.T) {
-	// confine — net off = UnshareAll && !ShareNet -> no --share-net.
-	off := Translate(Policy{UnshareAll: true, ShareNet: false})
-	if contains(off, "--share-net") {
-		t.Fatalf("net-off policy must not emit --share-net: %v", off)
+// The invariants are always emitted and --unshare-net never is — plexus never
+// wants a fresh, routeless netns; a sandboxed agent always inherits the prepared
+// one (--share-net).
+func TestTranslateInvariants(t *testing.T) {
+	got := Translate(Policy{System: []string{"/usr"}})
+	for _, want := range [][]string{
+		{"--dev", "/dev"}, {"--proc", "/proc"}, {"--tmpfs", "/tmp"},
+		{"--unshare-all"}, {"--share-net"},
+		{"--cap-drop", "ALL"}, {"--die-with-parent"},
+	} {
+		if !containsSeq(got, want) {
+			t.Fatalf("invariant %v missing: %v", want, got)
+		}
 	}
-	if !contains(off, "--unshare-all") {
-		t.Fatalf("expected --unshare-all: %v", off)
+	if contains(got, "--unshare-net") {
+		t.Fatalf("--unshare-net must never be emitted: %v", got)
 	}
+}
 
-	// provision (--role-card read-only inject + writable workspace) + ambient.
+// The semantic faces lower correctly: ro base, provision (role card ro,
+// workspace/home rw + chdir + HOME), masking, and the sealed env grant.
+func TestTranslateSemantic(t *testing.T) {
 	got := Translate(Policy{
-		ROBinds:       []Bind{{Src: "/host/agents/a/role.yaml", Dest: "/plexus/role.yaml"}},
-		Binds:         []Bind{{Src: "/host/agents/a/ws", Dest: "/work"}},
-		DieWithParent: true,
+		System: []string{"/usr", "/bin"},
+		Provision: Provision{
+			RoleCard:  Bind{Src: "/h/role.yaml"},
+			Workspace: Bind{Src: "/h/ws"},
+			Home:      Bind{Src: "/h/home"},
+		},
+		Mask:     []string{"/prod"},
+		Clearenv: true,
+		Env:      []EnvVar{{Key: "TOKEN", Value: "x"}},
 	})
 	for _, want := range [][]string{
-		{"--ro-bind", "/host/agents/a/role.yaml", "/plexus/role.yaml"},
-		{"--bind", "/host/agents/a/ws", "/work"},
-		{"--die-with-parent"},
+		{"--ro-bind", "/usr", "/usr"},
+		{"--ro-bind", "/bin", "/bin"},
+		{"--ro-bind", "/h/role.yaml", RoleCardPath}, // role card read-only
+		{"--bind", "/h/ws", WorkspaceDir}, {"--chdir", WorkspaceDir},
+		{"--bind", "/h/home", HomeDir}, {"--setenv", "HOME", HomeDir},
+		{"--tmpfs", "/prod"},
+		{"--clearenv"}, {"--setenv", "TOKEN", "x"},
 	} {
 		if !containsSeq(got, want) {
 			t.Fatalf("Translate missing %v in %v", want, got)
 		}
 	}
-
-	// The zero policy emits nothing (build outward from DefaultPolicy).
-	if got := Translate(Policy{}); len(got) != 0 {
-		t.Fatalf("zero Policy should translate to no args, got %v", got)
+	// The role card must be read-only — never a writable --bind (self-escalation guard).
+	if containsSeq(got, []string{"--bind", "/h/role.yaml", RoleCardPath}) {
+		t.Fatalf("role card must be --ro-bind, not --bind: %v", got)
 	}
 }
 
-// A hardened policy exercises the E4.3 boundary-vocabulary added on top of the
-// E4.2 shell: env curation (secret), cap-drop (exec/proc), net-off, chdir
-// (provision), user-ns + die-with-parent (ambient).
-func TestTranslateHardened(t *testing.T) {
-	got := Translate(Policy{
-		UnshareAll:    true, // net stays off: no ShareNet
-		Clearenv:      true,
-		Setenv:        []EnvVar{{Key: "PATH", Value: "/usr/bin"}, {Key: "HOME", Value: "/work"}},
-		CapDrop:       []string{"CAP_NET_RAW", "CAP_SYS_ADMIN"},
-		Chdir:         "/work",
-		UnshareUser:   true,
-		DieWithParent: true,
-	})
-	for _, want := range [][]string{
-		{"--unshare-all"},
-		{"--clearenv"},
-		{"--setenv", "PATH", "/usr/bin"},
-		{"--setenv", "HOME", "/work"},
-		{"--cap-drop", "CAP_NET_RAW"},
-		{"--cap-drop", "CAP_SYS_ADMIN"},
-		{"--chdir", "/work"},
-		{"--unshare-user"},
-		{"--die-with-parent"},
+// Policy.Describe renders the fs/namespace confinement for the env-state frame —
+// sandbox-side paths and isolation, never bwrap flags (E4.5).
+func TestPolicyDescribe(t *testing.T) {
+	d := Policy{
+		System: []string{"/usr", "/bin"},
+		Provision: Provision{
+			RoleCard:  Bind{Src: "/h/r"},
+			State:     Bind{Src: "/h/s"},
+			Workspace: Bind{Src: "/h/ws"},
+			Home:      Bind{Src: "/h/home"},
+		},
+		Mask: []string{"/prod"},
+	}.Describe()
+	for _, want := range []string{
+		"Writable paths: " + StateDir + ", " + WorkspaceDir + ", " + HomeDir,
+		"Read-only paths (you cannot modify these): /usr, /bin, " + RoleCardPath,
+		"Ephemeral in-memory paths (cleared on exit): /tmp, /prod",
+		"Working directory: " + WorkspaceDir,
+		"isolated pid/ipc/user namespaces",
 	} {
-		if !containsSeq(got, want) {
-			t.Fatalf("hardened Translate missing %v in %v", want, got)
+		if !strings.Contains(d, want) {
+			t.Fatalf("Policy.Describe missing %q:\n%s", want, d)
 		}
 	}
-	if contains(got, "--share-net") {
-		t.Fatalf("hardened policy must keep net off: %v", got)
+	if strings.Contains(d, "--bind") || strings.Contains(d, "ro-bind") {
+		t.Fatalf("Describe must not leak bwrap flags:\n%s", d)
 	}
 }
 

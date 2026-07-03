@@ -2,15 +2,16 @@ package bwrap
 
 import "testing"
 
-func TestProvisionAddTo(t *testing.T) {
-	p := DefaultPolicy()
-	Provision{
+// Provision lowers through Translate: role card read-only at the default path, the
+// private DB / workspace / HOME writable (workspace Dest overridable and driving
+// --chdir), HOME env following the home Dest.
+func TestProvisionTranslate(t *testing.T) {
+	args := Translate(Policy{Provision: Provision{
 		RoleCard:  Bind{Src: "/host/dev/role.yaml"},              // default Dest -> RoleCardPath
 		State:     Bind{Src: "/host/dev/state"},                  // default Dest -> StateDir
 		Workspace: Bind{Src: "/host/dev/ws", Dest: "/workspace"}, // manual Dest override
 		Home:      Bind{Src: "/host/dev/home"},                   // default Dest -> HomeDir
-	}.AddTo(&p)
-	args := Translate(p)
+	}})
 
 	for _, want := range [][]string{
 		{"--ro-bind", "/host/dev/role.yaml", RoleCardPath}, // role card: read-only, default path
@@ -28,11 +29,8 @@ func TestProvisionAddTo(t *testing.T) {
 	if containsSeq(args, []string{"--bind", "/host/dev/role.yaml", RoleCardPath}) {
 		t.Fatalf("role card must be --ro-bind, not --bind: %v", args)
 	}
-	// An empty Provision contributes nothing.
-	base := DefaultPolicy()
-	before := len(Translate(base))
-	Provision{}.AddTo(&base)
-	if len(Translate(base)) != before {
-		t.Fatalf("empty Provision must add no args")
+	// An empty Provision contributes no provision mounts (Translate still emits the invariants).
+	if got := (Provision{}).args(); len(got) != 0 {
+		t.Fatalf("empty Provision must yield no args, got %v", got)
 	}
 }

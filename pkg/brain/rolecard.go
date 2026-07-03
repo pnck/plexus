@@ -49,6 +49,13 @@ type RoleCard struct {
 	// Description says when to route work to this role; it is for the E5/E6 selector,
 	// not the agent's own prompt (mirrors a subagent's `description`).
 	Description string `yaml:"description,omitempty"`
+
+	// NOTE: hard sandbox switches (network egress policy, resource limits, netns
+	// mode) are NOT role-card fields. They are immutable startup config injected at
+	// launch and consumed by Setup (Phase 0); the LLM never sees the mechanism, only
+	// a rendered summary of its concrete limits in the sandbox environment-state L1
+	// frame (e.g. netpol.NetPolicy.Describe()). The role card is soft, LLM-facing
+	// guidance only.
 }
 
 // RenderSystemPrompt assembles the structured fields into the role card's L1

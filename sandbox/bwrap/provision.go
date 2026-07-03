@@ -1,5 +1,7 @@
 package bwrap
 
+import "strings"
+
 // Default sandbox-path convention (E4.4, provision face). These are DEFAULTS used
 // when a Provision Bind leaves Dest empty; every one can be overridden per
 // deployment by setting the Bind's Dest — the paths are not hardcoded law, a
@@ -35,27 +37,61 @@ type Provision struct {
 	Home Bind
 }
 
-// AddTo folds the provision mounts into p at each Bind's Dest (defaulting to the
-// convention when Dest is empty). Additive: the launcher composes confine +
-// provision + ambient into one Policy and enforces it (E4.6). The role card is
-// read-only; the workspace sets Chdir; the home sets HOME.
-func (pv Provision) AddTo(p *Policy) {
+// args renders the provisioned mounts as bwrap arguments (Translate composes them
+// with the read-only base and the invariants): role card --ro-bind (cannot rewrite
+// its own authority), state/workspace/home --bind, plus --chdir (workspace) and the
+// HOME env.
+func (pv Provision) args() []string {
+	var a []string
 	if pv.RoleCard.Src != "" {
-		p.ROBinds = append(p.ROBinds, withDest(pv.RoleCard, RoleCardPath))
+		b := withDest(pv.RoleCard, RoleCardPath)
+		a = append(a, "--ro-bind", b.Src, b.Dest)
 	}
 	if pv.State.Src != "" {
-		p.Binds = append(p.Binds, withDest(pv.State, StateDir))
+		b := withDest(pv.State, StateDir)
+		a = append(a, "--bind", b.Src, b.Dest)
 	}
 	if pv.Workspace.Src != "" {
 		b := withDest(pv.Workspace, WorkspaceDir)
-		p.Binds = append(p.Binds, b)
-		p.Chdir = b.Dest
+		a = append(a, "--bind", b.Src, b.Dest, "--chdir", b.Dest)
 	}
 	if pv.Home.Src != "" {
 		b := withDest(pv.Home, HomeDir)
-		p.Binds = append(p.Binds, b)
-		p.Setenv = append(p.Setenv, EnvVar{Key: "HOME", Value: b.Dest})
+		a = append(a, "--bind", b.Src, b.Dest, "--setenv", "HOME", b.Dest)
 	}
+	return a
+}
+
+// writable lists the writable provisioned sandbox paths (state/workspace/home) for
+// Policy.Describe.
+func (pv Provision) writable() string {
+	var ds []string
+	if pv.State.Src != "" {
+		ds = append(ds, destOf(pv.State, StateDir))
+	}
+	if pv.Workspace.Src != "" {
+		ds = append(ds, destOf(pv.Workspace, WorkspaceDir))
+	}
+	if pv.Home.Src != "" {
+		ds = append(ds, destOf(pv.Home, HomeDir))
+	}
+	return strings.Join(ds, ", ")
+}
+
+// workdir is the sandbox-side workspace path (the working directory), or "".
+func (pv Provision) workdir() string {
+	if pv.Workspace.Src == "" {
+		return ""
+	}
+	return destOf(pv.Workspace, WorkspaceDir)
+}
+
+// roleCardDest is the sandbox-side role-card path (read-only), or "".
+func (pv Provision) roleCardDest() string {
+	if pv.RoleCard.Src == "" {
+		return ""
+	}
+	return destOf(pv.RoleCard, RoleCardPath)
 }
 
 // withDest returns b with its Dest defaulted to def when empty.
@@ -65,3 +101,6 @@ func withDest(b Bind, def string) Bind {
 	}
 	return b
 }
+
+// destOf is withDest(...).Dest.
+func destOf(b Bind, def string) string { return withDest(b, def).Dest }

@@ -1,126 +1,127 @@
 package bwrap
 
-// This file is E4.2 — the sandbox translation-layer abstraction (formerly E3.5).
-// It lowers a provider-neutral sandbox Policy (the "plexus flags") into concrete
-// bwrap CLI arguments. The Policy vocabulary follows E4.1's three faces:
+import (
+	"fmt"
+	"strings"
+)
+
+// This file is the E4.2 sandbox translation layer, designed around plexus RUNTIME
+// SEMANTICS rather than as a 1:1 mirror of bwrap's flags. A Policy says what a
+// sandboxed plexus agent's world IS — its read-only base image, the paths injected
+// into it, what's hidden, and its environment. Translate lowers that to the exact
+// bwrap invocation, BAKING IN the isolation invariants every sandboxed agent
+// shares: full namespace isolation, an inherited network namespace, /dev+/proc+
+// /tmp scaffolding, cap-drop ALL, and die-with-parent. Those are not knobs — plexus
+// never varies them, so they are not fields, and the impossible bwrap combinations
+// they would allow simply do not exist here.
 //
-//   - confine   : what the agent must NOT reach (mounts, network, namespaces)
-//   - provision : what the launcher injects read-only (role card, workspace, …)
-//   - ambient   : global one-shot properties (die-with-parent, …)
-//
-// E4.2 ships the MECHANISM + a behavior-preserving DefaultPolicy (== E0's former
-// hardcoded args). E4.3 fills the three faces with real per-agent values (seccomp,
-// cgroup, bus-only netns, --role-card injection); E4.4 threads a per-agent Policy
-// through EnterIfRequested. See tracking/E4-sandbox-isolation.md.
-//
-// The Policy fields are semantic (plexus-level), not bwrap-CLI-shaped, so a second
-// sandbox provider could translate the same Policy differently. Kept in this
-// package while there is one provider; promote to sandbox/ when a second lands.
+// Network egress is NOT a bwrap concern: it is netpol.NetPolicy (redirect/reject/
+// drop per protocol), lowered to nft/tproxy by Setup, and carried alongside this
+// Policy in sandbox.Environment. bwrap only ever inherits the prepared netns
+// (--share-net), which is one of the baked invariants below.
 
 // Bind is a host->sandbox mount: the host Src path is made visible at Dest inside
 // the sandbox.
 type Bind struct{ Src, Dest string }
 
-// Policy describes the isolation an agent's effector-host runs under. Build it from
-// DefaultPolicy (or a per-agent policy, E4.3); the zero value emits no arguments.
-// Fields are grouped by E4.1's three faces. NOTE: ROBinds/Binds serve both confine
-// (bind only what's needed) and provision (inject role card read-only / workspace
-// writable) — a mount is a mount; the face is intent, not a separate field.
-type Policy struct {
-	// ── confine (deny reach) ──
-	ROBinds    []Bind   // read-only mounts (--ro-bind); E0 default: {"/","/"} (whole rootfs)
-	Binds      []Bind   // read-write mounts (--bind); provision writable paths go here
-	Dev        []string // devtmpfs mounts (--dev)
-	Proc       []string // proc mounts (--proc)
-	Tmpfs      []string // tmpfs mounts (--tmpfs)
-	UnshareAll bool     // --unshare-all (net/pid/ipc/uts/cgroup/user)
-	UnshareNet bool     // --unshare-net (net-off for policies that do NOT UnshareAll)
-	// ShareNet re-exposes the network after UnshareAll. Net-off = UnshareAll &&
-	// !ShareNet. Fine-grained "bus reachable, internet denied" is NOT a single flag
-	// (net is non-binary, E4.1 §2) — that lands later in E4.3.
-	ShareNet bool
-	Clearenv bool     // --clearenv (drop the inherited env; re-add only what's granted)
-	Setenv   []EnvVar // --setenv K V (secret face: only granted credentials)
-	CapDrop  []string // --cap-drop CAP (exec/proc face; e.g. CAP_NET_RAW, CAP_SYS_ADMIN)
-
-	// ── provision (working dir into the injected workspace) ──
-	Chdir string // --chdir DIR
-
-	// ── ambient (global one-shot) ──
-	UnshareUser   bool // --unshare-user (identity; subsumed by UnshareAll but separable)
-	DieWithParent bool // --die-with-parent: never outlive the launcher (no orphan sandbox)
-
-	// NOTE (E4.3 pending, needs decisions): seccomp filter (--seccomp needs a compiled
-	// BPF fd — generation mechanism TBD), cgroup resource limits (NOT a bwrap arg —
-	// via setrlimit/cgroup v2), and "bus-only" netns. See tracking/E4 doc.
-}
-
-// EnvVar is one --setenv key/value the launcher grants into the sandbox.
+// EnvVar is one environment variable granted into the sandbox.
 type EnvVar struct{ Key, Value string }
 
-// DefaultPolicy reproduces E0's former hardcoded bwrap args EXACTLY, so routing
-// Enter through Translate(DefaultPolicy()) is behavior-preserving. It is
-// deliberately permissive (whole rootfs read-only, network shared, no seccomp/cap
-// drop); E4.3 tightens it per agent.
+// Policy is plexus's semantic description of one sandboxed agent's filesystem +
+// environment — only what VARIES per agent. The isolation invariants are baked into
+// Translate, not exposed here.
+type Policy struct {
+	// System is the read-only base rootfs the agent sees (ro-bind) — the curated
+	// image that is its world. Default: the whole host "/"; a per-agent production
+	// policy (E4.6) narrows it to a minimal subset.
+	System []string
+
+	// Provision is what the launcher injects (E4.4): the role card (read-only, so an
+	// agent cannot rewrite its own authority) and the writable state / workspace /
+	// HOME. It also sets the working directory (the workspace) and HOME.
+	Provision Provision
+
+	// Mask hides sensitive host paths (e.g. /prod, host secrets, other agents' trees)
+	// behind an empty tmpfs, so the agent can neither see nor reach them.
+	Mask []string
+
+	// Clearenv seals the environment (drop everything inherited); Env is then the
+	// only environment the agent gets — the secret face. A permissive/dev policy
+	// leaves it false to inherit the host env.
+	Clearenv bool
+	Env      []EnvVar
+}
+
+// DefaultPolicy is the sensible default for running a single agent (chat/dev) in
+// sandbox mode — which is opt-in; the normal path is un-sandboxed. It shows the
+// whole host filesystem read-only and inherits the environment (dev convenience). A
+// per-agent production policy (E4.6) narrows System, masks secrets, and seals env.
 func DefaultPolicy() Policy {
-	return Policy{
-		ROBinds:    []Bind{{Src: "/", Dest: "/"}},
-		Dev:        []string{"/dev"},
-		Proc:       []string{"/proc"},
-		Tmpfs:      []string{"/tmp"},
-		UnshareAll: true,
-		ShareNet:   true,
-	}
+	return Policy{System: []string{"/"}}
 }
 
 // Translate lowers a Policy into bwrap CLI arguments, EXCLUDING the bwrap binary
-// path, the ticket bind, and the trailing "-- <argv>" — those are the sandbox
-// mechanism's job in Enter, not isolation policy. Argument order is deterministic
-// and honors bwrap semantics: mounts first, then namespace unshare/reshare, then
-// writable binds, then ambient flags.
+// path, the ticket bind, and the trailing "-- <argv>" (those are the sandbox
+// mechanism's job in Enter, not isolation policy). It bakes in the invariants every
+// sandboxed agent shares; argument order honors bwrap semantics (broad mounts, then
+// overlays, then namespaces, then env, then confinement/lifecycle).
 func Translate(p Policy) []string {
 	var a []string
-	for _, b := range p.ROBinds {
-		a = append(a, "--ro-bind", b.Src, b.Dest)
+	// The read-only base rootfs — the agent's world.
+	for _, sys := range p.System {
+		a = append(a, "--ro-bind", sys, sys)
 	}
-	for _, d := range p.Dev {
-		a = append(a, "--dev", d)
+	// Standard sandbox scaffolding (invariant): a minimal /dev, the agent's own
+	// /proc, and an ephemeral /tmp.
+	a = append(a, "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
+	// Injected cognition (E4.4): role card ro, state/workspace/home rw, chdir, HOME.
+	a = append(a, p.Provision.args()...)
+	// Hide sensitive host paths behind an empty tmpfs.
+	for _, m := range p.Mask {
+		a = append(a, "--tmpfs", m)
 	}
-	for _, pr := range p.Proc {
-		a = append(a, "--proc", pr)
-	}
-	for _, t := range p.Tmpfs {
-		a = append(a, "--tmpfs", t)
-	}
-	if p.UnshareAll {
-		a = append(a, "--unshare-all")
-	}
-	if p.UnshareNet {
-		a = append(a, "--unshare-net")
-	}
-	if p.ShareNet {
-		a = append(a, "--share-net")
-	}
-	if p.UnshareUser {
-		a = append(a, "--unshare-user")
-	}
-	for _, b := range p.Binds {
-		a = append(a, "--bind", b.Src, b.Dest)
-	}
+	// Namespaces (invariant): isolate pid/ipc/uts/cgroup/user; KEEP (inherit) the
+	// network namespace Setup prepared — never a fresh, routeless one.
+	a = append(a, "--unshare-all", "--share-net")
+	// Environment (secret face).
 	if p.Clearenv {
 		a = append(a, "--clearenv")
 	}
-	for _, e := range p.Setenv {
+	for _, e := range p.Env {
 		a = append(a, "--setenv", e.Key, e.Value)
 	}
-	for _, c := range p.CapDrop {
-		a = append(a, "--cap-drop", c)
-	}
-	if p.Chdir != "" {
-		a = append(a, "--chdir", p.Chdir)
-	}
-	if p.DieWithParent {
-		a = append(a, "--die-with-parent")
-	}
+	// Confinement + lifecycle (invariant): the agent is unprivileged and must never
+	// outlive its launcher.
+	a = append(a, "--cap-drop", "ALL", "--die-with-parent")
 	return a
+}
+
+// Describe renders the LLM-facing summary of the filesystem + namespace
+// confinement — the "what can I touch, what's hidden" an agent needs up front. It
+// feeds the sandbox environment-state L1 frame (composed with the network limits by
+// sandbox.Environment.Describe(), E4.5). The bwrap mechanism is never surfaced.
+func (p Policy) Describe() string {
+	var b strings.Builder
+	if w := p.Provision.writable(); w != "" {
+		fmt.Fprintf(&b, "Writable paths: %s.\n", w)
+	}
+	if ro := p.readOnly(); ro != "" {
+		fmt.Fprintf(&b, "Read-only paths (you cannot modify these): %s.\n", ro)
+	}
+	fmt.Fprintf(&b, "Ephemeral in-memory paths (cleared on exit): %s.\n",
+		strings.Join(append([]string{"/tmp"}, p.Mask...), ", "))
+	if wd := p.Provision.workdir(); wd != "" {
+		fmt.Fprintf(&b, "Working directory: %s.\n", wd)
+	}
+	b.WriteString("You run in isolated pid/ipc/user namespaces; host processes and other agents are not visible.")
+	return b.String()
+}
+
+// readOnly lists the read-only sandbox paths — the system base plus the role card.
+func (p Policy) readOnly() string {
+	ro := append([]string{}, p.System...)
+	if rc := p.Provision.roleCardDest(); rc != "" {
+		ro = append(ro, rc)
+	}
+	return strings.Join(ro, ", ")
 }
