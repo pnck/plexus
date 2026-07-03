@@ -2,6 +2,7 @@ package netpol
 
 import (
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -18,6 +19,27 @@ type Params struct {
 	MaxConns   int    // ct count over N (per-agent concurrent egress cap); 0 = no cap
 }
 
+// Validate rejects Params that would corrupt the generated ruleset. CP is the only
+// free-form string interpolated into the nftables text, so it MUST be a bare IPv4
+// address: a CP carrying whitespace, a newline, or nft metacharacters could inject
+// arbitrary rules and defeat the deny-all fence. The other interpolated fields are
+// numeric (int/uint32 formatted as %d/%x — no injection is possible) but BusPort
+// and MaxConns are range-checked so a misconfiguration fails here rather than
+// emitting a broken ruleset. Generation is fail-closed: GenerateNFT / GenerateIPRules
+// call this first and return an error (never a silently-permissive fence) on failure.
+func (pr Params) Validate() error {
+	if ip := net.ParseIP(pr.CP); ip == nil || ip.To4() == nil {
+		return fmt.Errorf("netpol: CP %q must be a bare IPv4 address", pr.CP)
+	}
+	if pr.BusPort < 1 || pr.BusPort > 65535 {
+		return fmt.Errorf("netpol: BusPort %d out of range 1..65535", pr.BusPort)
+	}
+	if pr.MaxConns < 0 {
+		return fmt.Errorf("netpol: MaxConns %d must be >= 0", pr.MaxConns)
+	}
+	return nil
+}
+
 // GenerateNFT lowers a NetPolicy into an nftables ruleset (deterministic text).
 //
 // Model (tracking/E4-establishment-flow.md §6.2): a single filter/output chain
@@ -26,7 +48,10 @@ type Params struct {
 // granted action — `redirect` marks the packet for the TPROXY reroute (§6.9),
 // `reject` refuses it, `drop` is left to fall through to the chain policy. The log
 // scope adds `log` to a protocol's blocked/redirected line.
-func GenerateNFT(p NetPolicy, pr Params) string {
+func GenerateNFT(p NetPolicy, pr Params) (string, error) {
+	if err := pr.Validate(); err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	b.WriteString("table inet mesh {\n")
 	b.WriteString("  chain out {\n")
@@ -41,7 +66,7 @@ func GenerateNFT(p NetPolicy, pr Params) string {
 	b.WriteString(protoRule(UDP, p, pr))
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
-	return b.String()
+	return b.String(), nil
 }
 
 // protoRule emits the line(s) for one protocol per its action + log scope. A
@@ -73,12 +98,15 @@ func protoRule(proto Proto, p NetPolicy, pr Params) string {
 // GenerateIPRules emits the policy routing that delivers TPROXY-marked local
 // output back for local delivery to plexus's IP_TRANSPARENT egress socket (§6.9).
 // It is only needed when at least one protocol is redirect; otherwise nil.
-func GenerateIPRules(p NetPolicy, pr Params) []string {
+func GenerateIPRules(p NetPolicy, pr Params) ([]string, error) {
+	if err := pr.Validate(); err != nil {
+		return nil, err
+	}
 	if p.TCP != Redirect && p.UDP != Redirect {
-		return nil
+		return nil, nil
 	}
 	return []string{
 		fmt.Sprintf("ip rule add fwmark 0x%x lookup %d", pr.Mark, pr.Table),
 		fmt.Sprintf("ip route add local default dev lo table %d", pr.Table),
-	}
+	}, nil
 }
