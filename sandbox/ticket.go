@@ -2,38 +2,52 @@ package sandbox
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// GenerateTicket generates a random 16-byte hex ticket and writes "OK" to a temp file.
-// It returns the absolute path to the ticket file.
+// The ticket is the one-time handover token that lets the re-exec'd plexus tell it
+// is ALREADY inside the sandbox (so it self-confines instead of re-entering bwrap in
+// a loop). It is NOT a security boundary: the parent controls both the env var and
+// the filesystem, so a malicious parent could always forge one. The nonce check
+// below only guards against a stale/mismatched env var or an accidental collision —
+// the file's content must equal the random nonce embedded in its own name.
+
+const ticketPrefix = "plexus_sandbox_"
+
+// GenerateTicket writes a random nonce to a temp file named after that nonce and
+// returns the path.
 func GenerateTicket() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("crypto rand failed: %w", err)
 	}
-
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("plexus_sandbox_%x.ticket", b))
-
-	if err := os.WriteFile(path, []byte("OK"), 0600); err != nil {
+	nonce := hex.EncodeToString(b)
+	path := filepath.Join(os.TempDir(), ticketPrefix+nonce+".ticket")
+	if err := os.WriteFile(path, []byte(nonce), 0600); err != nil {
 		return "", fmt.Errorf("failed to write sandbox ticket to %s: %w", path, err)
 	}
-
 	return path, nil
 }
 
-// VerifyAndConsumeTicket reads the specified ticket file and then immediately deletes it.
+// VerifyAndConsumeTicket reads the ticket, checks its content matches the nonce in
+// its filename, then deletes it. See the package note: this defends against a stale
+// env var, not a hostile parent.
 func VerifyAndConsumeTicket(path string) error {
-	_, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read sandbox ticket (spoof attempt or stale env?): %w", err)
 	}
-
+	name := filepath.Base(path)
+	expected := strings.TrimSuffix(strings.TrimPrefix(name, ticketPrefix), ".ticket")
+	if expected == "" || name == expected || string(data) != expected {
+		return fmt.Errorf("sandbox ticket content mismatch (spoof attempt or stale env?)")
+	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("failed to consume/delete sandbox ticket: %w", err)
 	}
-
 	return nil
 }
