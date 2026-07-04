@@ -29,10 +29,10 @@ import (
 // CAP_NET_ADMIN and a writable cgroup subtree (Phase 0 runs as the privileged Setup,
 // flow doc §7). Runtime verification belongs in a privileged env.
 //
-// The nft builder mirrors the golden netpol.GenerateNFT text rule-for-rule; the two
-// must stay in sync. (The `log` lines and the `ct count` cap are refinements not yet
-// built here — see the TODOs — but the deny-all fence + bus-direct + redirect→mark
-// core is complete.)
+// The nft builder mirrors the golden netpol.GenerateNFT text rule-for-rule (deny-all
+// policy, loopback/bus accept, ct established, ct-count cap, per-protocol redirect
+// mark / reject / drop, and the `log` prefix) — the two representations must stay in
+// sync by hand until a privileged golden-equivalence test locks them together.
 type OSExecutor struct {
 	ns map[string]netns.NsHandle // named netns handles, by name
 }
@@ -174,6 +174,7 @@ func (x *OSExecutor) applyReroute(name string, params netpol.Params) error {
 	_, defDst, _ := net.ParseCIDR("0.0.0.0/0")
 	return h.RouteAdd(&netlink.Route{
 		Type:      unix.RTN_LOCAL,
+		Scope:     unix.RT_SCOPE_HOST, // matches `ip route add local …`
 		Table:     params.Table,
 		Dst:       defDst,
 		LinkIndex: lo.Attrs().Index,
@@ -289,7 +290,9 @@ func protoRule(proto uint8, action netpol.NetAction, mark uint32, tcp, log bool)
 		if tcp {
 			return append(e, &expr.Reject{Type: unix.NFT_REJECT_TCP_RST})
 		}
-		return append(e, &expr.Reject{Type: unix.NFT_REJECT_ICMP_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})
+		// inet-family chain: use the family-agnostic ICMPX reject (NFT_REJECT_ICMP_UNREACH
+		// is IPv4-only and needs an nfproto dependency this rule doesn't carry).
+		return append(e, &expr.Reject{Type: unix.NFT_REJECT_ICMPX_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})
 	default: // Drop with logging -> log then drop
 		return append(e, &expr.Verdict{Kind: expr.VerdictDrop})
 	}

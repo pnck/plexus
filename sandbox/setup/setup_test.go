@@ -78,6 +78,7 @@ func TestSetupSequence(t *testing.T) {
 	}
 	want := []string{
 		"CreateNetns ns-agent-1",
+		"SetLinkUp ns-agent-1 lo",
 		"CreateVethPair veth-h1 veth-a1",
 		"MoveToNetns veth-a1 ns-agent-1",
 		"SetAddr host veth-h1 10.0.0.1/30",

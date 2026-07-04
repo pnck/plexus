@@ -130,6 +130,10 @@ func Setup(p Plan, x Executor) error {
 		do   func() error
 	}{
 		{"create netns", func() error { return x.CreateNetns(p.Netns) }},
+		// The netns's own loopback starts DOWN; bring it up — the fence accepts
+		// 127.0.0.0/8, the TPROXY reroute delivers `dev lo`, and the egress proxy binds
+		// 127.0.0.1, all of which need lo up.
+		{"up loopback", func() error { return x.SetLinkUp(p.Netns, "lo") }},
 		{"create veth", func() error { return x.CreateVethPair(p.VethHost, p.VethPeer) }},
 		{"move veth to netns", func() error { return x.MoveToNetns(p.VethPeer, p.Netns) }},
 		{"addr host veth", func() error { return x.SetAddr("", p.VethHost, p.HostCIDR) }},
