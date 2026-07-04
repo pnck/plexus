@@ -53,6 +53,14 @@ func EnterIfRequested(sandboxed bool, provider Provider, extraArgs []string) err
 		return fmt.Errorf("FATAL: %w", err)
 	}
 
+	// Phase 2 self-confinement (flow doc §4): now that bwrap has built the
+	// namespaces, the agent shrinks its own surface — lower rlimits, then load the
+	// seccomp filter — before it runs any untrusted work. Both are unprivileged and
+	// irreversible; this is the last thing before the cognitive loop.
+	if err := confineSelf(DefaultConfinement()); err != nil {
+		return fmt.Errorf("FATAL: phase-2 confinement: %w", err)
+	}
+
 	slog.Info("[Sandbox] Verified deterministic entry into isolated environment!")
 	return nil
 }
