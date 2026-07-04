@@ -93,7 +93,13 @@ func spoofedUDPSocket(from *net.UDPAddr) (*net.UDPConn, error) {
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		var serr error
 		if err := c.Control(func(fd uintptr) {
-			serr = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1)
+			if e := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); e != nil {
+				serr = e
+				return
+			}
+			// concurrent reply sockets may bind the same spoofed source (two flows
+			// talking to the same server) — allow it.
+			serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 		}); err != nil {
 			return err
 		}

@@ -7,9 +7,15 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"plexus/sandbox/caps"
 	"plexus/sandbox/netpol"
+)
+
+const (
+	relayDialTimeout = 10 * time.Second // dialing the CP relay
+	udpIdleTimeout   = 60 * time.Second // evict a UDP flow after this long with no reply traffic
 )
 
 // RequiredCaps reports that the transparent listeners need CAP_NET_ADMIN
@@ -38,7 +44,8 @@ func (p *Proxy) dialRelay() (net.Conn, error) {
 	if p.DialRelay != nil {
 		return p.DialRelay()
 	}
-	return net.Dial("tcp", p.Relay)
+	d := net.Dialer{Timeout: relayDialTimeout}
+	return d.Dial("tcp", p.Relay)
 }
 
 // ServeTCP accepts TPROXY-intercepted TCP connections from ln (opened with
@@ -78,9 +85,13 @@ func (p *Proxy) handleTCP(client net.Conn) error {
 		return nil
 	}
 
-	if src, ok := client.RemoteAddr().(*net.TCPAddr); ok {
-		if a, err := Attribute("tcp", src.IP, src.Port); err == nil && a.PID != 0 {
-			slog.Debug("egress tcp", "pid", a.PID, "comm", a.Comm, "dst", orig.String())
+	// Per-process attribution scans /proc (O(system fds)); only pay for it when this
+	// protocol is audited.
+	if p.Policy.Logs(netpol.TCP) {
+		if src, ok := client.RemoteAddr().(*net.TCPAddr); ok {
+			if a, err := Attribute("tcp", src.IP, src.Port); err == nil && a.PID != 0 {
+				slog.Debug("egress tcp", "pid", a.PID, "comm", a.Comm, "dst", orig.String())
+			}
 		}
 	}
 
@@ -96,13 +107,18 @@ func (p *Proxy) handleTCP(client net.Conn) error {
 	return nil
 }
 
-// pipe copies bidirectionally until either side closes, then tears down both.
+// pipe copies bidirectionally. When one direction reaches EOF it half-closes the
+// write side of the peer (so a client's shutdown(SHUT_WR) does not truncate the
+// reply direction); the caller closes both conns fully afterward.
 func pipe(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
-		_ = dst.Close()
-		_ = src.Close()
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = dst.Close()
+		}
 		done <- struct{}{}
 	}
 	go cp(a, b)
@@ -126,14 +142,19 @@ func (p *Proxy) ServeUDP(uc *net.UDPConn) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			return err
+			// A single datagram we can't parse (e.g. a missing orig-dst cmsg) must not
+			// kill the whole proxy — skip it and keep serving.
+			slog.Debug("egress udp recv", "err", err)
+			continue
 		}
 		// UDP has no clean refusal; reject and drop both just don't forward.
 		if p.Policy.Decide(netpol.UDP) != netpol.Redirect {
 			continue
 		}
-		if a, err := Attribute("udp", src.IP, src.Port); err == nil && a.PID != 0 {
-			slog.Debug("egress udp", "pid", a.PID, "comm", a.Comm, "dst", dst.String())
+		if p.Policy.Logs(netpol.UDP) {
+			if a, err := Attribute("udp", src.IP, src.Port); err == nil && a.PID != 0 {
+				slog.Debug("egress udp", "pid", a.PID, "comm", a.Comm, "dst", dst.String())
+			}
 		}
 		flows.forward(src, dst, append([]byte(nil), buf[:n]...))
 	}
@@ -164,33 +185,48 @@ func (f *udpFlows) forward(src, dst *net.UDPAddr, payload []byte) {
 		return
 	}
 	if _, err := fl.tunnel.Write(frame); err != nil {
-		f.drop(src)
+		f.drop(fl)
 	}
 }
 
+// get returns the flow for src, creating one if absent. It dials the relay OUTSIDE
+// the lock (never blocking the whole flow map on a slow relay) and re-checks after.
 func (f *udpFlows) get(src *net.UDPAddr) (*udpFlow, error) {
+	key := src.String()
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if fl, ok := f.bysrc[src.String()]; ok {
+	if fl, ok := f.bysrc[key]; ok {
+		f.mu.Unlock()
 		return fl, nil
 	}
+	f.mu.Unlock()
+
 	conn, err := f.proxy.dialRelay()
 	if err != nil {
 		return nil, fmt.Errorf("dial relay: %w", err)
 	}
+
+	f.mu.Lock()
+	if fl, ok := f.bysrc[key]; ok { // another datagram raced us to it
+		f.mu.Unlock()
+		_ = conn.Close()
+		return fl, nil
+	}
 	fl := &udpFlow{tunnel: conn, src: src}
-	f.bysrc[src.String()] = fl
+	f.bysrc[key] = fl
+	f.mu.Unlock()
 	go f.replies(fl)
 	return fl, nil
 }
 
-// replies reads relayed datagrams from the tunnel and writes each back to the
-// agent source, spoofing the source address as the datagram's original destination.
+// replies reads relayed datagrams from the tunnel and spoofs each back to the agent
+// source. An idle read deadline evicts the flow so ephemeral-port clients (e.g. DNS,
+// a fresh source port per query) don't leak a tunnel + goroutine each.
 func (f *udpFlows) replies(fl *udpFlow) {
-	defer f.drop(fl.src)
+	defer f.drop(fl)
 	acc := make([]byte, 0, 64*1024)
 	rd := make([]byte, 32*1024)
 	for {
+		_ = fl.tunnel.SetReadDeadline(time.Now().Add(udpIdleTimeout))
 		n, err := fl.tunnel.Read(rd)
 		if n > 0 {
 			acc = append(acc, rd[:n]...)
@@ -200,18 +236,20 @@ func (f *udpFlows) replies(fl *udpFlow) {
 					break
 				}
 				if from, e := net.ResolveUDPAddr("udp", dst); e == nil {
-					f.spoofReply(from, fl.src, payload)
+					spoofReply(from, fl.src, payload)
 				}
 				acc = acc[used:]
 			}
 		}
 		if err != nil {
-			return
+			return // EOF, idle timeout, or tunnel error -> evict
 		}
 	}
 }
 
-func (f *udpFlows) spoofReply(from, to *net.UDPAddr, payload []byte) {
+// spoofReply sends payload to `to` with the source spoofed to `from` (the original
+// destination) via a transparent socket.
+func spoofReply(from, to *net.UDPAddr, payload []byte) {
 	s, err := spoofedUDPSocket(from)
 	if err != nil {
 		slog.Debug("egress udp reply", "err", err)
@@ -221,12 +259,15 @@ func (f *udpFlows) spoofReply(from, to *net.UDPAddr, payload []byte) {
 	_, _ = s.WriteToUDP(payload, to)
 }
 
-func (f *udpFlows) drop(src *net.UDPAddr) {
+// drop tears down fl only if it is STILL the registered flow for its source — an
+// identity compare-and-delete that stops a stale goroutine from evicting a freshly
+// re-created flow for the same source (an ABA race).
+func (f *udpFlows) drop(fl *udpFlow) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if fl, ok := f.bysrc[src.String()]; ok {
+	if cur, ok := f.bysrc[fl.src.String()]; ok && cur == fl {
 		_ = fl.tunnel.Close()
-		delete(f.bysrc, src.String())
+		delete(f.bysrc, fl.src.String())
 	}
 }
 

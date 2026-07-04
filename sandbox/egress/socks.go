@@ -44,6 +44,9 @@ func SOCKS5Connect(rw io.ReadWriter, dst *net.TCPAddr) error {
 	if _, err := io.ReadFull(rw, head); err != nil {
 		return fmt.Errorf("socks: connect reply: %w", err)
 	}
+	if head[0] != 0x05 {
+		return fmt.Errorf("socks: bad reply version %d", head[0])
+	}
 	if head[1] != 0x00 {
 		return fmt.Errorf("socks: relay refused (rep=%d)", head[1])
 	}
