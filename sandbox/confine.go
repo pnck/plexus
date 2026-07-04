@@ -18,7 +18,13 @@ type Confinement struct {
 // values here are deliberately loose so they never break ordinary dev work.
 func DefaultConfinement() Confinement {
 	return Confinement{
-		Rlimits: Rlimits{NOFILE: 8192, NPROC: 2048},
+		// NOFILE + NPROC guard fds and fork bombs; FSIZE caps a single file at 4 GiB.
+		// AS (virtual address space) is deliberately left unset — it is a poor proxy
+		// for real memory (runtimes reserve huge virtual ranges) and would break
+		// normal tools; true memory/disk caps come from the cgroup layer (memory.max),
+		// which ApplyRlimits complements as the always-available floor. All are clamped
+		// to the inherited hard limit, so a low-hard-limit host never fails here.
+		Rlimits: Rlimits{NOFILE: 8192, NPROC: 2048, FSIZE: 4 << 30},
 		Seccomp: seccomp.DefaultProfile(),
 	}
 }

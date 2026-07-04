@@ -27,8 +27,19 @@ func ApplyRlimits(l Rlimits) error {
 		if e.val == 0 {
 			continue
 		}
-		if err := unix.Setrlimit(e.res, &unix.Rlimit{Cur: e.val, Max: e.val}); err != nil {
-			return fmt.Errorf("setrlimit %s=%d: %w", e.name, e.val, err)
+		// Clamp to the inherited hard limit: an unprivileged process can only LOWER
+		// its rlimits, so trying to RAISE a hard limit above what it inherited fails
+		// with EPERM. A floor value below the inherited limit still applies as a cap.
+		var cur unix.Rlimit
+		if err := unix.Getrlimit(e.res, &cur); err != nil {
+			return fmt.Errorf("getrlimit %s: %w", e.name, err)
+		}
+		v := e.val
+		if cur.Max != unix.RLIM_INFINITY && v > cur.Max {
+			v = cur.Max
+		}
+		if err := unix.Setrlimit(e.res, &unix.Rlimit{Cur: v, Max: v}); err != nil {
+			return fmt.Errorf("setrlimit %s=%d: %w", e.name, v, err)
 		}
 	}
 	return nil
