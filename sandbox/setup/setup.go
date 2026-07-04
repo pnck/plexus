@@ -71,8 +71,13 @@ type Executor interface {
 	SetAddr(netns, iface, cidr string) error
 	SetLinkUp(netns, iface string) error
 	AddDefaultRoute(netns, gateway string) error
-	ApplyNFT(netns, ruleset string) error
-	AddIPRules(netns string, rules []string) error
+	// ApplyFence installs the egress fence into the netns from the immutable
+	// NetPolicy + Params: the nft ruleset (deny-all, bus-direct, redirect→TPROXY
+	// mark, ct count) and, for a redirected protocol, the TPROXY reroute (fwmark
+	// rule + local route). The real executor drives nftables + netlink directly
+	// (netpol.GenerateNFT/GenerateIPRules are the golden text it mirrors); the fake
+	// records the (policy, params) it was asked to apply.
+	ApplyFence(netns string, policy netpol.NetPolicy, params netpol.Params) error
 	CreateCgroup(name string, lim CgroupLimits) error
 	// EnterAndExec joins the netns + cgroup and execs argv (replacing the process, so
 	// it does not return on success). The child's parent stays the caller (the CP).
@@ -91,20 +96,16 @@ type Executor interface {
 // It is fail-closed and fail-fast: any error aborts before (or during) the build
 // and the agent is never spawned, so a half-built fence never runs an agent.
 func Setup(p Plan, x Executor) error {
-	// (1) Pure generation first — Params.Validate() runs here, so a bad plan (e.g. a
-	// CP that is not a bare IPv4, which could inject nft rules) fails before any
-	// kernel object exists.
-	ruleset, err := netpol.GenerateNFT(p.Net, p.NFT)
-	if err != nil {
-		return fmt.Errorf("setup %s: generate nft: %w", p.AgentID, err)
-	}
-	ipRules, err := netpol.GenerateIPRules(p.Net, p.NFT)
-	if err != nil {
-		return fmt.Errorf("setup %s: generate ip-rules: %w", p.AgentID, err)
+	// (1) Fail-closed: validate the fence params before any kernel object exists — a
+	// bad plan (e.g. a CP that is not a bare IPv4, which could inject nft rules)
+	// builds nothing.
+	if err := p.NFT.Validate(); err != nil {
+		return fmt.Errorf("setup %s: %w", p.AgentID, err)
 	}
 
-	// (2) Network namespace + veth: the peer end lives in the netns with the agent
-	// address; the host end is the gateway; the only route reaches the CP.
+	// (2) Network namespace + veth (peer in the netns with the agent address, host
+	// end the gateway, single route to the CP); (3) the egress fence built from the
+	// NetPolicy; (4) the resource cgroup.
 	steps := []struct {
 		what string
 		do   func() error
@@ -117,18 +118,7 @@ func Setup(p Plan, x Executor) error {
 		{"addr agent veth", func() error { return x.SetAddr(p.Netns, p.VethPeer, p.AgentCIDR) }},
 		{"up agent veth", func() error { return x.SetLinkUp(p.Netns, p.VethPeer) }},
 		{"default route to CP", func() error { return x.AddDefaultRoute(p.Netns, p.Gateway) }},
-
-		// (3) Egress fence: deny-all nft + bus-direct + redirect→TPROXY mark, then the
-		// TPROXY reroute (only present when a protocol is redirected).
-		{"apply nft fence", func() error { return x.ApplyNFT(p.Netns, ruleset) }},
-		{"apply tproxy ip-rules", func() error {
-			if len(ipRules) == 0 {
-				return nil
-			}
-			return x.AddIPRules(p.Netns, ipRules)
-		}},
-
-		// (4) Resource cgroup.
+		{"apply egress fence", func() error { return x.ApplyFence(p.Netns, p.Net, p.NFT) }},
 		{"create cgroup", func() error { return x.CreateCgroup(p.AgentID, p.Cgroup) }},
 	}
 	for _, s := range steps {
