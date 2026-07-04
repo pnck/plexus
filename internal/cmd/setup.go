@@ -3,8 +3,10 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	"plexus/sandbox/bwrap"
@@ -100,6 +102,12 @@ var setupCmd = &cobra.Command{
 			return fmt.Errorf("setup: marshal policy: %w", err)
 		}
 
+		// The relay port carves the proxy's own upstream out of the fence (no TPROXY loop).
+		relayPort := 0
+		if _, p, err := net.SplitHostPort(setupRelay); err == nil {
+			relayPort, _ = strconv.Atoi(p)
+		}
+
 		plan := setup.Plan{
 			AgentID:   setupAgentID,
 			Netns:     setupNetns,
@@ -110,7 +118,7 @@ var setupCmd = &cobra.Command{
 			Gateway:   setupGateway,
 			Net:       netpol.NetPolicy{TCP: parseNetAction(setupNetTCP), UDP: parseNetAction(setupNetUDP)},
 			NFT: netpol.Params{
-				CP: setupCP, BusPort: setupBusPort, EgressPort: setupEgressPort,
+				CP: setupCP, BusPort: setupBusPort, RelayPort: relayPort, EgressPort: setupEgressPort,
 				Mark: setupMark, Table: setupTable, MaxConns: setupMaxConns,
 			},
 			Cgroup: setup.CgroupLimits{MemoryMax: setupMemMax, PidsMax: setupPidsMax},

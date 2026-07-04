@@ -11,8 +11,10 @@ import (
 // plexus listens on, the fwmark + routing-table id for the local-output TPROXY
 // reroute, and the per-agent concurrent-connection cap.
 type Params struct {
-	CP         string // control-plane address, e.g. "10.0.0.1"
-	BusPort    int    // CP bus port (allowed direct, not proxied)
+	CP        string // control-plane address, e.g. "10.0.0.1"
+	BusPort   int    // CP bus port (allowed direct, not proxied)
+	RelayPort int    // CP EgressRelay port (allowed direct, so the proxy's own upstream
+	// connection isn't re-intercepted into a TPROXY loop); 0 = omit
 	EgressPort int    // local TPROXY port plexus's transparent proxy listens on
 	Mark       uint32 // fwmark for the TPROXY reroute
 	Table      int    // ip-rule / ip-route table id for the reroute
@@ -58,6 +60,11 @@ func GenerateNFT(p NetPolicy, pr Params) (string, error) {
 	b.WriteString("    type filter hook output priority 0; policy drop;\n")
 	b.WriteString("    ip daddr 127.0.0.0/8 accept\n")
 	fmt.Fprintf(&b, "    ip daddr %s tcp dport %d accept\n", pr.CP, pr.BusPort)
+	if pr.RelayPort > 0 {
+		// the transparent proxy's own upstream to the CP relay — direct, so it is not
+		// re-marked and re-intercepted into a TPROXY loop.
+		fmt.Fprintf(&b, "    ip daddr %s tcp dport %d accept\n", pr.CP, pr.RelayPort)
+	}
 	b.WriteString("    ct state established,related accept\n")
 	if pr.MaxConns > 0 {
 		fmt.Fprintf(&b, "    ct state new meta l4proto { tcp, udp } ct count over %d drop\n", pr.MaxConns)

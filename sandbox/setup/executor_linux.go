@@ -217,15 +217,22 @@ func (x *OSExecutor) applyNFT(name string, policy netpol.NetPolicy, params netpo
 
 	// ip daddr 127.0.0.0/8 accept
 	add(append(ipv4DaddrMasked(net.IPv4(127, 0, 0, 0).To4(), []byte{0xff, 0, 0, 0}), acceptVerdict()...))
-	// ip daddr <CP> tcp dport <BUS> accept  (bus direct)
+	// ip daddr <CP> tcp dport <port> accept — the bus, and the relay (so the proxy's
+	// own upstream to the CP relay isn't re-marked into a TPROXY loop).
 	if cp := net.ParseIP(params.CP).To4(); cp != nil {
-		e := ipv4Daddr(cp)
-		e = append(e, l4proto(unix.IPPROTO_TCP)...)
-		e = append(e,
-			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(params.BusPort)},
-		)
-		add(append(e, acceptVerdict()...))
+		cpTCPAccept := func(port int) {
+			e := ipv4Daddr(cp)
+			e = append(e, l4proto(unix.IPPROTO_TCP)...)
+			e = append(e,
+				&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
+			)
+			add(append(e, acceptVerdict()...))
+		}
+		cpTCPAccept(params.BusPort)
+		if params.RelayPort > 0 {
+			cpTCPAccept(params.RelayPort)
+		}
 	}
 	// ct state established,related accept
 	add([]expr.Any{
