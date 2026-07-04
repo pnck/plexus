@@ -52,6 +52,9 @@ func (r *recorder) CreateCgroup(name string, _ CgroupLimits) error {
 func (r *recorder) EnterAndExec(n, cg string, _ int, argv, _ []string) error {
 	return r.log("EnterAndExec " + n + " " + cg + " " + strings.Join(argv, ","))
 }
+func (r *recorder) Cleanup(netns, vethHost string) error {
+	return r.log("Cleanup " + netns + " " + vethHost)
+}
 
 func testPlan() Plan {
 	return Plan{
@@ -135,13 +138,24 @@ func TestSetupAbortsOnError(t *testing.T) {
 	if err := Setup(testPlan(), r); err == nil {
 		t.Fatal("Setup must propagate the executor error")
 	}
+	var sawFence, sawCleanup bool
 	for _, c := range r.calls {
 		if strings.HasPrefix(c, "CreateCgroup") || strings.HasPrefix(c, "EnterAndExec") {
 			t.Fatalf("must abort at ApplyFence, but ran %q", c)
 		}
+		if strings.HasPrefix(c, "ApplyFence") {
+			sawFence = true
+		}
+		if strings.HasPrefix(c, "Cleanup") {
+			sawCleanup = true
+		}
 	}
-	if last := r.calls[len(r.calls)-1]; !strings.HasPrefix(last, "ApplyFence") {
-		t.Fatalf("last call should be the failed ApplyFence, got %q", last)
+	if !sawFence {
+		t.Fatal("ApplyFence should have run (and failed)")
+	}
+	// The failure unwinds the half-built netns/veth.
+	if !sawCleanup {
+		t.Fatalf("a failed step should trigger Cleanup, got %v", r.calls)
 	}
 }
 

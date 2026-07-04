@@ -62,6 +62,23 @@ func (x *OSExecutor) CreateNetns(name string) error {
 	return nil
 }
 
+// Cleanup best-effort removes the named netns (dropping the moved veth) and any
+// dangling host-side veth, so a failed Setup leaves nothing for a retry to collide
+// with. Errors are advisory — the objects may already be gone.
+func (x *OSExecutor) Cleanup(name, vethHost string) error {
+	if h, ok := x.ns[name]; ok {
+		_ = h.Close()
+		delete(x.ns, name)
+	}
+	_ = netns.DeleteNamed(name)
+	if vethHost != "" {
+		if link, err := netlink.LinkByName(vethHost); err == nil {
+			_ = netlink.LinkDel(link)
+		}
+	}
+	return nil
+}
+
 func (x *OSExecutor) CreateVethPair(host, peer string) error {
 	la := netlink.NewLinkAttrs()
 	la.Name = host

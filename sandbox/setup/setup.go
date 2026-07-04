@@ -101,6 +101,11 @@ type Executor interface {
 	// confined agent cannot (CAP_NET_ADMIN is gone); it only serves the inherited fds.
 	// The child's parent stays the caller (the persistent CP).
 	EnterAndExec(netns, cgroup string, egressPort int, argv, env []string) error
+
+	// Cleanup best-effort tears down the netns (and its moved veth) plus a dangling
+	// host-side veth, so a failed Setup doesn't leave orphaned kernel objects that a
+	// retry would collide with. Errors are advisory.
+	Cleanup(netns, vethHost string) error
 }
 
 // Setup runs the Phase 0 sequence for one agent (flow doc §1 timeline / §2):
@@ -146,12 +151,14 @@ func Setup(p Plan, x Executor) error {
 	}
 	for _, s := range steps {
 		if err := s.do(); err != nil {
+			_ = x.Cleanup(p.Netns, p.VethHost) // unwind the half-built netns/veth
 			return fmt.Errorf("setup %s: %s: %w", p.AgentID, s.what, err)
 		}
 	}
 
 	// (5) Enter the prepared netns + cgroup and exec the agent (replaces the process).
 	if err := x.EnterAndExec(p.Netns, p.AgentID, p.NFT.EgressPort, p.Argv, p.Env); err != nil {
+		_ = x.Cleanup(p.Netns, p.VethHost)
 		return fmt.Errorf("setup %s: enter+exec: %w", p.AgentID, err)
 	}
 	return nil

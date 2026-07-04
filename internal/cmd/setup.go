@@ -124,6 +124,17 @@ var setupCmd = &cobra.Command{
 			relayPort, _ = strconv.Atoi(p)
 		}
 
+		// The agent reads the relay + per-protocol policy + fs Policy from the env; only
+		// override the relay when set (an empty append would blank an inherited value).
+		agentEnv := append(os.Environ(),
+			egress.EnvNetTCP+"="+setupNetTCP,
+			egress.EnvNetUDP+"="+setupNetUDP,
+			bwrap.EnvPolicy+"="+string(policyJSON),
+		)
+		if setupRelay != "" {
+			agentEnv = append(agentEnv, egress.EnvRelay+"="+setupRelay)
+		}
+
 		plan := setup.Plan{
 			AgentID:   setupAgentID,
 			Netns:     setupNetns,
@@ -141,14 +152,7 @@ var setupCmd = &cobra.Command{
 			Uid:    setupUID,
 			Gid:    setupGID,
 			Argv:   args,
-			// The agent reads the relay + per-protocol policy from the environment; the
-			// transparent socket fds are added by EnterAndExec.
-			Env: append(os.Environ(),
-				egress.EnvRelay+"="+setupRelay,
-				egress.EnvNetTCP+"="+setupNetTCP,
-				egress.EnvNetUDP+"="+setupNetUDP,
-				bwrap.EnvPolicy+"="+string(policyJSON),
-			),
+			Env:    agentEnv, // transparent socket fds are appended by EnterAndExec
 		}
 		return setup.Setup(plan, x) // execs the agent on success; returns only on error
 	},
