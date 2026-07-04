@@ -8,8 +8,16 @@ import (
 	"net"
 	"sync"
 
+	"plexus/sandbox/caps"
 	"plexus/sandbox/netpol"
 )
+
+// RequiredCaps reports that the transparent listeners need CAP_NET_ADMIN
+// (IP_TRANSPARENT), making Proxy a caps.Requirer so the launcher counts it in the
+// central, up-front capability check. The transparent sockets are created in the
+// privileged Phase 0 and handed to the confined agent, which then needs no cap to
+// serve them.
+func (p *Proxy) RequiredCaps() caps.Set { return caps.Of(caps.NetAdmin) }
 
 // Proxy is the agent-side transparent egress proxy that runs inside the per-agent
 // netns. nft TPROXY-intercepts every allowed outbound flow (TCP/UDP) to this proxy's

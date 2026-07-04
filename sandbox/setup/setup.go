@@ -15,8 +15,16 @@ package setup
 import (
 	"fmt"
 
+	"plexus/sandbox/caps"
 	"plexus/sandbox/netpol"
 )
+
+// RequiredCaps reports the host capabilities Phase-0 Setup needs: CAP_NET_ADMIN for
+// the netns/veth/route/nft config (and the IP_TRANSPARENT egress sockets),
+// CAP_SYS_ADMIN to create and mount the network namespace. The launcher unions this
+// with the other participants' needs (caps.Collect) and raises them once at startup
+// (caps.Ensure) before running Setup — the central, up-front capability check.
+func RequiredCaps() caps.Set { return caps.Of(caps.NetAdmin, caps.SysAdmin) }
 
 // CgroupLimits are the per-agent resource ceilings written into the cgroup (values
 // from the E5 catalog). A zero field means "leave unset". When cgroup delegation is
@@ -52,6 +60,13 @@ type Plan struct {
 	NFT netpol.Params
 
 	Cgroup CgroupLimits
+
+	// Uid/Gid are the identity the agent runs as inside the sandbox. This is an
+	// EXTERNAL launch parameter — identity, not a capability — so it is passed in
+	// (from the E5 catalog) rather than acquired. 0 keeps the launcher's id; a
+	// non-zero value is threaded to bwrap's user-namespace mapping in Phase 1.
+	Uid int
+	Gid int
 
 	// The agent to launch once its netns + cgroup are ready: `plexus run … --sandbox`
 	// WITHOUT a ticket, so it enters the self-reexec path (Phase 1). Its parent stays
