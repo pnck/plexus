@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"plexus/pkg/mesh"
 	"plexus/sandbox"
 	"plexus/sandbox/bwrap"
+	"plexus/sandbox/egress"
 )
 
 var (
@@ -26,6 +28,14 @@ var runCmd = &cobra.Command{
 		if err := sandbox.EnterIfRequested(sandboxed, bwrap.New(), nil); err != nil {
 			return err
 		}
+
+		// Inside a per-agent netns, serve the transparent egress proxy on the sockets
+		// Setup handed down (no-op when there is no netns fence, e.g. dev/chat).
+		stopEgress, err := egress.ServeInherited()
+		if err != nil {
+			return fmt.Errorf("egress proxy: %w", err)
+		}
+		defer stopEgress()
 
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()

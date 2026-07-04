@@ -49,7 +49,7 @@ func (r *recorder) ApplyFence(n string, pol netpol.NetPolicy, pr netpol.Params) 
 func (r *recorder) CreateCgroup(name string, _ CgroupLimits) error {
 	return r.log("CreateCgroup " + name)
 }
-func (r *recorder) EnterAndExec(n, cg string, argv, _ []string) error {
+func (r *recorder) EnterAndExec(n, cg string, _ int, argv, _ []string) error {
 	return r.log("EnterAndExec " + n + " " + cg + " " + strings.Join(argv, ","))
 }
 

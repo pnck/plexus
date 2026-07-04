@@ -329,10 +329,12 @@ func (x *OSExecutor) CreateCgroup(name string, lim CgroupLimits) error {
 	return write("cpu.max", lim.CPUMax)
 }
 
-// EnterAndExec joins the prepared netns + cgroup, then execs the agent — replacing
-// this process, so its parent stays the caller (the persistent CP). The OS thread is
-// locked so the netns setns binds the thread that immediately execs.
-func (x *OSExecutor) EnterAndExec(name, cgroup string, argv, env []string) error {
+// EnterAndExec joins the prepared netns + cgroup, opens the IP_TRANSPARENT egress
+// sockets inside the netns (while still privileged) and hands them to the child as
+// inherited fds, then execs the agent — replacing this process, so its parent stays
+// the caller (the persistent CP). The OS thread is locked so the netns setns binds
+// the thread that immediately execs.
+func (x *OSExecutor) EnterAndExec(name, cgroup string, egressPort int, argv, env []string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("empty argv")
 	}
@@ -345,6 +347,25 @@ func (x *OSExecutor) EnterAndExec(name, cgroup string, argv, env []string) error
 	if err := unix.Setns(int(h), unix.CLONE_NEWNET); err != nil {
 		return fmt.Errorf("setns %s: %w", name, err)
 	}
+
+	// Open the transparent egress sockets now (privileged, in the netns) and pass
+	// them down: the confined agent has no CAP_NET_ADMIN to open them itself. The fds
+	// are left inheritable (no CLOEXEC) so they survive the exec chain.
+	if egressPort > 0 {
+		tcpFD, err := openTransparent(unix.SOCK_STREAM, egressPort)
+		if err != nil {
+			return fmt.Errorf("egress tcp socket: %w", err)
+		}
+		udpFD, err := openTransparent(unix.SOCK_DGRAM, egressPort)
+		if err != nil {
+			return fmt.Errorf("egress udp socket: %w", err)
+		}
+		env = append(env,
+			"PLEXUS_EGRESS_TCP_FD="+strconv.Itoa(tcpFD),
+			"PLEXUS_EGRESS_UDP_FD="+strconv.Itoa(udpFD),
+		)
+	}
+
 	if cgroup != "" {
 		procs := "/sys/fs/cgroup/" + cgroup + "/cgroup.procs"
 		if err := os.WriteFile(procs, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
@@ -356,4 +377,37 @@ func (x *OSExecutor) EnterAndExec(name, cgroup string, argv, env []string) error
 		return fmt.Errorf("lookpath %s: %w", argv[0], err)
 	}
 	return syscall.Exec(bin, argv, env)
+}
+
+// openTransparent creates a bound IP_TRANSPARENT socket on 127.0.0.1:port and
+// returns its fd (left inheritable — no SOCK_CLOEXEC — for the child to serve). UDP
+// sockets also get IP_RECVORIGDSTADDR so the proxy can recover original destinations.
+func openTransparent(sotype, port int) (int, error) {
+	fd, err := unix.Socket(unix.AF_INET, sotype, 0)
+	if err != nil {
+		return -1, err
+	}
+	fail := func(e error) (int, error) { _ = unix.Close(fd); return -1, e }
+	if err := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+		return fail(err)
+	}
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		return fail(err)
+	}
+	if sotype == unix.SOCK_DGRAM {
+		if err := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1); err != nil {
+			return fail(err)
+		}
+	}
+	sa := &unix.SockaddrInet4{Port: port}
+	copy(sa.Addr[:], net.IPv4(127, 0, 0, 1).To4())
+	if err := unix.Bind(fd, sa); err != nil {
+		return fail(err)
+	}
+	if sotype == unix.SOCK_STREAM {
+		if err := unix.Listen(fd, 128); err != nil {
+			return fail(err)
+		}
+	}
+	return fd, nil
 }
