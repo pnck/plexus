@@ -79,6 +79,7 @@ type Brain struct {
 	gateway            llm.Provider
 	reg                *effector.Registry
 	roleCard           RoleCard // structured role card; RenderSystemPrompt() seeds an L1 frame (after the kernel)
+	envState           string   // sandbox environment-state L1 frame (fs/net/limits), seeded after the role card
 	emitter            Emitter  // outbound seam to the control plane (task_* events, §5.7.10)
 	history            []Frame  // in-memory working transcript; the durable plan lives in the CheckpointStore (§5.7.9)
 	currentTask        string   // TaskID of the message being handled; scopes effectors and task_report
@@ -116,6 +117,11 @@ type Options struct {
 	Gateway  llm.Provider
 	Registry *effector.Registry
 	RoleCard RoleCard
+	// EnvState is the sandbox environment-state L1 frame — the concrete, immutable
+	// constraints (writable/read-only paths, network limits, resource ceilings) the
+	// agent runs under, rendered by sandbox.Environment.Describe(). Seeded as a third
+	// L1 system frame after the kernel + role card (§5.7.2); empty = omit.
+	EnvState string
 	Approver Approver
 	// Emitter is the outbound seam to the control plane for task_* domain events
 	// (§5.7.10). Defaults to NopEmitter (drops events) when nil — the real
@@ -194,6 +200,7 @@ func New(opt Options) *Brain {
 		gateway:            opt.Gateway,
 		reg:                opt.Registry,
 		roleCard:           opt.RoleCard,
+		envState:           opt.EnvState,
 		emitter:            emitter,
 		approver:           app,
 		onDelta:            opt.OnDelta,
@@ -230,6 +237,17 @@ func (b *Brain) seed() {
 			Provenance: "role_card",
 			Role:       llm.RoleSystem,
 			Content:    rendered,
+		})
+	}
+	// The sandbox environment-state frame — the third L1 source (§5.7.2): tell the
+	// agent its concrete, immutable constraints up front so it reasons within them
+	// instead of discovering them by trial. Results only, never the mechanism.
+	if b.envState != "" {
+		b.history = append(b.history, Frame{
+			Authority:  protocol.AuthSystem,
+			Provenance: "sandbox_env",
+			Role:       llm.RoleSystem,
+			Content:    b.envState,
 		})
 	}
 }

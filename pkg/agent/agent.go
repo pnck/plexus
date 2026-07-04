@@ -29,6 +29,10 @@ type Config struct {
 	// minimal card; the caller supplies the real one (chat's default, or the one
 	// loaded from the sandbox role-card path).
 	RoleCard brain.RoleCard
+	// EnvState is the rendered sandbox environment-state L1 frame (from
+	// sandbox.Environment.Describe()) — the agent's concrete fs/net/limit constraints.
+	// Empty omits the frame (e.g. an un-sandboxed dev run).
+	EnvState string
 	// Emitter receives the brain's task_* domain events. Nil defaults to RejectEmitter
 	// (an agent with no task DAG). The bus host supplies a real emitter later.
 	Emitter brain.Emitter
@@ -120,6 +124,7 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		Gateway:          cfg.Gateway,
 		Registry:         reg,
 		RoleCard:         cfg.RoleCard,
+		EnvState:         cfg.EnvState,
 		Approver:         approver,
 		Emitter:          emitter,
 		Checkpoints:      checkpoints,

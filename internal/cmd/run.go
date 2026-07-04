@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"plexus/sandbox"
 	"plexus/sandbox/bwrap"
 	"plexus/sandbox/egress"
+	"plexus/sandbox/netpol"
 )
 
 var (
@@ -77,6 +79,7 @@ func runNode(ctx context.Context) error {
 		Gateway:  gw,
 		DBPath:   brainDBPath(agentID),
 		RoleCard: roleCard,
+		EnvState: sandboxEnvState(),
 		// run_command stays off until the approval/yield path is wired for headless
 		// agents (E5); the approval-free builtins cover ordinary work.
 	})
@@ -124,6 +127,28 @@ func runNode(ctx context.Context) error {
 	}()
 	slog.Info("Starting plexus agent", "id", agentID, "sandboxed", sandboxed)
 	return node.Run(ctx)
+}
+
+// sandboxEnvState renders the sandbox environment-state L1 frame for a provisioned
+// agent (fs view + network limits + resource ceilings), so the brain can tell the
+// LLM its concrete constraints up front. It reads the same startup env Setup set;
+// when there is no provisioned Policy (un-sandboxed dev run) it returns "" so no
+// frame is injected.
+func sandboxEnvState() string {
+	js := os.Getenv(bwrap.EnvPolicy)
+	if js == "" {
+		return ""
+	}
+	var pol bwrap.Policy
+	if err := json.Unmarshal([]byte(js), &pol); err != nil {
+		return ""
+	}
+	env := sandbox.Environment{Policy: pol, Limits: sandbox.DefaultConfinement().Rlimits}
+	if tcp := os.Getenv(egress.EnvNetTCP); tcp != "" {
+		np := netpol.NetPolicy{TCP: parseNetAction(tcp), UDP: parseNetAction(os.Getenv(egress.EnvNetUDP))}
+		env.Net = &np
+	}
+	return env.Describe()
 }
 
 // brainDBPath is the brain-private SQLite path for a run agent: the provisioned
