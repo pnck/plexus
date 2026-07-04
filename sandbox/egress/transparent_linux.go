@@ -86,28 +86,26 @@ func parseOrigDst(oob []byte) (*net.UDPAddr, error) {
 	return nil, fmt.Errorf("egress: no IP_RECVORIGDSTADDR control message")
 }
 
-// spoofedUDPSocket opens a UDP socket bound (via IP_TRANSPARENT) to a non-local
-// address `from`, so a relayed reply written from it appears to come straight from
-// the real server the agent addressed (flow doc §6.9 reply path).
-func spoofedUDPSocket(from *net.UDPAddr) (*net.UDPConn, error) {
-	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
-		var serr error
-		if err := c.Control(func(fd uintptr) {
-			if e := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); e != nil {
-				serr = e
-				return
-			}
-			// concurrent reply sockets may bind the same spoofed source (two flows
-			// talking to the same server) — allow it.
-			serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
-		}); err != nil {
-			return err
-		}
-		return serr
-	}}
-	pc, err := lc.ListenPacket(context.Background(), "udp", from.String())
-	if err != nil {
-		return nil, err
+// writeSpoofedUDP sends payload to `to` on the ALREADY-TRANSPARENT inherited listen
+// socket uc, spoofing the source as `from` via an IP_PKTINFO control message. The
+// confined agent has no CAP_NET_ADMIN to open its own IP_TRANSPARENT reply socket,
+// but uc was opened privileged by Setup and carries IP_TRANSPARENT, so a per-datagram
+// IPI_SPEC_DST lets a relayed reply appear to come straight from the real server
+// (flow doc §6.9 reply path). WriteMsgUDP is safe to call concurrently with the read
+// loop on the same UDPConn.
+func writeSpoofedUDP(uc *net.UDPConn, from, to *net.UDPAddr, payload []byte) error {
+	src := from.IP.To4()
+	if src == nil {
+		return fmt.Errorf("egress: spoof source %v is not IPv4", from.IP)
 	}
-	return pc.(*net.UDPConn), nil
+	sz := int(unsafe.Sizeof(unix.Inet4Pktinfo{}))
+	oob := make([]byte, unix.CmsgSpace(sz))
+	h := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+	h.Level = unix.IPPROTO_IP
+	h.Type = unix.IP_PKTINFO
+	h.SetLen(unix.CmsgLen(sz))
+	pi := (*unix.Inet4Pktinfo)(unsafe.Pointer(&oob[unix.CmsgLen(0)]))
+	copy(pi.Spec_dst[:], src)
+	_, _, err := uc.WriteMsgUDP(payload, oob, to)
+	return err
 }

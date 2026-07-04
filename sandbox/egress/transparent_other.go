@@ -20,4 +20,4 @@ func readUDPOrigDst(*net.UDPConn, []byte, []byte) (int, *net.UDPAddr, *net.UDPAd
 	return 0, nil, nil, errLinuxOnly
 }
 
-func spoofedUDPSocket(*net.UDPAddr) (*net.UDPConn, error) { return nil, errLinuxOnly }
+func writeSpoofedUDP(*net.UDPConn, *net.UDPAddr, *net.UDPAddr, []byte) error { return errLinuxOnly }

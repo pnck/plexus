@@ -131,7 +131,7 @@ func pipe(a, b net.Conn) {
 // relays allowed ones to the CP over a per-source tunnel, and spoofs replies back so
 // they appear to come from the real destination. It returns when uc is closed.
 func (p *Proxy) ServeUDP(uc *net.UDPConn) error {
-	flows := &udpFlows{proxy: p, bysrc: map[string]*udpFlow{}}
+	flows := &udpFlows{proxy: p, uc: uc, bysrc: map[string]*udpFlow{}}
 	defer flows.closeAll()
 
 	buf := make([]byte, 64*1024)
@@ -169,6 +169,7 @@ type udpFlow struct {
 
 type udpFlows struct {
 	proxy *Proxy
+	uc    *net.UDPConn // the inherited transparent listen socket, reused to spoof replies
 	mu    sync.Mutex
 	bysrc map[string]*udpFlow
 }
@@ -236,7 +237,9 @@ func (f *udpFlows) replies(fl *udpFlow) {
 					break
 				}
 				if from, e := net.ResolveUDPAddr("udp", dst); e == nil {
-					spoofReply(from, fl.src, payload)
+					if werr := writeSpoofedUDP(f.uc, from, fl.src, payload); werr != nil {
+						slog.Debug("egress udp reply", "err", werr)
+					}
 				}
 				acc = acc[used:]
 			}
@@ -245,18 +248,6 @@ func (f *udpFlows) replies(fl *udpFlow) {
 			return // EOF, idle timeout, or tunnel error -> evict
 		}
 	}
-}
-
-// spoofReply sends payload to `to` with the source spoofed to `from` (the original
-// destination) via a transparent socket.
-func spoofReply(from, to *net.UDPAddr, payload []byte) {
-	s, err := spoofedUDPSocket(from)
-	if err != nil {
-		slog.Debug("egress udp reply", "err", err)
-		return
-	}
-	defer s.Close()
-	_, _ = s.WriteToUDP(payload, to)
 }
 
 // drop tears down fl only if it is STILL the registered flow for its source — an
