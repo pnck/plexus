@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
@@ -40,13 +41,14 @@ var (
 
 	// Phase-1 bwrap Policy (fs / provision / env) — the values Setup assembles and
 	// hands to the agent via bwrap.EnvPolicy.
-	setupRoleCard  string
-	setupWorkspace string
-	setupState     string
-	setupHome      string
-	setupSystem    []string
-	setupMask      []string
-	setupClearenv  bool
+	setupRoleCard    string
+	setupWorkspace   string
+	setupState       string
+	setupHome        string
+	setupSystem      []string
+	setupMask        []string
+	setupClearenv    bool
+	setupNameservers []string
 )
 
 // setupCmd is the privileged Phase-0 entry (flow doc §2): it centrally checks/raises
@@ -87,16 +89,30 @@ var setupCmd = &cobra.Command{
 		if len(system) == 0 {
 			system = []string{"/"}
 		}
+		provision := bwrap.Provision{
+			RoleCard:  bwrap.Bind{Src: setupRoleCard},
+			State:     bwrap.Bind{Src: setupState},
+			Workspace: bwrap.Bind{Src: setupWorkspace},
+			Home:      bwrap.Bind{Src: setupHome},
+		}
+		// DNS-over-TCP resolv.conf, so a udp:drop role still resolves. Generated here
+		// and bound read-only into the sandbox at /etc/resolv.conf.
+		if len(setupNameservers) > 0 {
+			rc, err := netpol.ResolvConf(setupNameservers)
+			if err != nil {
+				return err
+			}
+			path := filepath.Join(os.TempDir(), "plexus-setup-"+setupAgentID+"-resolv.conf")
+			if err := os.WriteFile(path, []byte(rc), 0o644); err != nil {
+				return fmt.Errorf("setup: write resolv.conf: %w", err)
+			}
+			provision.ResolvConf = bwrap.Bind{Src: path}
+		}
 		policyJSON, err := json.Marshal(bwrap.Policy{
-			System:   system,
-			Mask:     setupMask,
-			Clearenv: setupClearenv,
-			Provision: bwrap.Provision{
-				RoleCard:  bwrap.Bind{Src: setupRoleCard},
-				State:     bwrap.Bind{Src: setupState},
-				Workspace: bwrap.Bind{Src: setupWorkspace},
-				Home:      bwrap.Bind{Src: setupHome},
-			},
+			System:    system,
+			Mask:      setupMask,
+			Clearenv:  setupClearenv,
+			Provision: provision,
 		})
 		if err != nil {
 			return fmt.Errorf("setup: marshal policy: %w", err)
@@ -180,4 +196,5 @@ func init() {
 	f.StringSliceVar(&setupSystem, "ro-system", nil, "read-only base rootfs paths (default: whole /)")
 	f.StringSliceVar(&setupMask, "mask", nil, "sensitive host paths to hide behind tmpfs")
 	f.BoolVar(&setupClearenv, "clearenv", false, "seal the environment (only granted vars survive)")
+	f.StringSliceVar(&setupNameservers, "nameserver", nil, "DNS nameserver IP(s); provisions a DNS-over-TCP /etc/resolv.conf")
 }

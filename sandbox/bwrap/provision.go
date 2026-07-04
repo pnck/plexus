@@ -7,10 +7,11 @@ import "strings"
 // deployment by setting the Bind's Dest — the paths are not hardcoded law, a
 // different base image can place things elsewhere.
 const (
-	RoleCardPath = "/plexus/role.yaml" // role card, READ-ONLY (an agent must not rewrite its own authority)
-	StateDir     = "/plexus/state"     // brain-private SQLite (Checkpoint + WorkingMemory), read-write
-	WorkspaceDir = "/work"             // the working tree, read-write; also the chdir target
-	HomeDir      = "/home/plexus"      // writable HOME; user-space tools install here
+	RoleCardPath   = "/plexus/role.yaml" // role card, READ-ONLY (an agent must not rewrite its own authority)
+	StateDir       = "/plexus/state"     // brain-private SQLite (Checkpoint + WorkingMemory), read-write
+	WorkspaceDir   = "/work"             // the working tree, read-write; also the chdir target
+	HomeDir        = "/home/plexus"      // writable HOME; user-space tools install here
+	ResolvConfPath = "/etc/resolv.conf"  // DNS config, READ-ONLY (DNS-over-TCP so udp:drop still resolves)
 )
 
 // Provision is what the launcher injects into an agent's sandbox: the role card
@@ -35,6 +36,10 @@ type Provision struct {
 	// curated base image. Mirrors Claude Code's sandbox: ro system + writable HOME +
 	// user-space install. empty Dest -> HomeDir.
 	Home Bind
+	// ResolvConf is a read-only /etc/resolv.conf the launcher generated (DNS-over-TCP,
+	// `options use-vc`, so a udp:drop role still resolves names — E4.6.6). empty Dest
+	// -> ResolvConfPath.
+	ResolvConf Bind
 }
 
 // args renders the provisioned mounts as bwrap arguments (Translate composes them
@@ -58,6 +63,10 @@ func (pv Provision) args() []string {
 	if pv.Home.Src != "" {
 		b := withDest(pv.Home, HomeDir)
 		a = append(a, "--bind", b.Src, b.Dest, "--setenv", "HOME", b.Dest)
+	}
+	if pv.ResolvConf.Src != "" {
+		b := withDest(pv.ResolvConf, ResolvConfPath)
+		a = append(a, "--ro-bind", b.Src, b.Dest)
 	}
 	return a
 }
