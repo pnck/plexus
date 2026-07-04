@@ -2,6 +2,7 @@ package bwrap
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -50,6 +51,11 @@ type Policy struct {
 	// leaves it false to inherit the host env.
 	Clearenv bool
 	Env      []EnvVar
+
+	// Uid / Gid map the agent's identity inside the user namespace (bwrap --uid/--gid).
+	// 0 keeps the launcher's mapping. An external launch parameter from the E5 catalog.
+	Uid int
+	Gid int
 }
 
 // DefaultPolicy is the sensible default for running a single agent (chat/dev) in
@@ -83,6 +89,13 @@ func Translate(p Policy) []string {
 	// Namespaces (invariant): isolate pid/ipc/uts/cgroup/user; KEEP (inherit) the
 	// network namespace Setup prepared — never a fresh, routeless one.
 	a = append(a, "--unshare-all", "--share-net")
+	// Identity within the user namespace; 0 keeps the launcher's mapping.
+	if p.Uid != 0 {
+		a = append(a, "--uid", strconv.Itoa(p.Uid))
+	}
+	if p.Gid != 0 {
+		a = append(a, "--gid", strconv.Itoa(p.Gid))
+	}
 	// Environment (secret face).
 	if p.Clearenv {
 		a = append(a, "--clearenv")

@@ -61,13 +61,6 @@ type Plan struct {
 
 	Cgroup CgroupLimits
 
-	// Uid/Gid are the identity the agent runs as inside the sandbox. This is an
-	// EXTERNAL launch parameter — identity, not a capability — so it is passed in
-	// (from the E5 catalog) rather than acquired. 0 keeps the launcher's id; a
-	// non-zero value is threaded to bwrap's user-namespace mapping in Phase 1.
-	Uid int
-	Gid int
-
 	// The agent to launch once its netns + cgroup are ready: `plexus run … --sandbox`
 	// WITHOUT a ticket, so it enters the self-reexec path (Phase 1). Its parent stays
 	// the persistent CP, so --die-with-parent anchors correctly.

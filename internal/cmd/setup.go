@@ -113,6 +113,8 @@ var setupCmd = &cobra.Command{
 			Mask:      setupMask,
 			Clearenv:  setupClearenv,
 			Provision: provision,
+			Uid:       setupUID,
+			Gid:       setupGID,
 		})
 		if err != nil {
 			return fmt.Errorf("setup: marshal policy: %w", err)
@@ -149,8 +151,6 @@ var setupCmd = &cobra.Command{
 				Mark: setupMark, Table: setupTable, MaxConns: setupMaxConns,
 			},
 			Cgroup: setup.CgroupLimits{MemoryMax: setupMemMax, PidsMax: setupPidsMax},
-			Uid:    setupUID,
-			Gid:    setupGID,
 			Argv:   args,
 			Env:    agentEnv, // transparent socket fds are appended by EnterAndExec
 		}
