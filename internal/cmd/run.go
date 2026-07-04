@@ -29,7 +29,11 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the plexus mesh daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := sandbox.EnterIfRequested(sandboxed, bwrap.New(), nil); err != nil {
+		provider, err := bwrap.ProviderFromEnv()
+		if err != nil {
+			return err
+		}
+		if err := sandbox.EnterIfRequested(sandboxed, provider, nil); err != nil {
 			return err
 		}
 

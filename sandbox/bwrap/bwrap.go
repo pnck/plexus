@@ -1,11 +1,31 @@
 package bwrap
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 )
+
+// EnvPolicy carries the JSON-encoded per-agent Policy from Phase-0 Setup down to the
+// agent's self-reexec (Phase 1), which builds the bwrap args from it. Empty means
+// DefaultPolicy (the dev baseline).
+const EnvPolicy = "PLEXUS_SANDBOX_POLICY"
+
+// ProviderFromEnv builds a bwrap provider from EnvPolicy: the per-agent Policy when
+// Setup set it, else the permissive DefaultPolicy.
+func ProviderFromEnv() (*Provider, error) {
+	js := os.Getenv(EnvPolicy)
+	if js == "" {
+		return New(), nil
+	}
+	var p Policy
+	if err := json.Unmarshal([]byte(js), &p); err != nil {
+		return nil, fmt.Errorf("bwrap: bad %s: %w", EnvPolicy, err)
+	}
+	return NewWithPolicy(p), nil
+}
 
 // ExtractBwrap writes the embedded bwrap binary to a temporary executable file.
 // It returns the absolute path to the extracted binary.
@@ -34,10 +54,22 @@ func ExtractBwrap() (string, error) {
 	return filepath.Abs(tmpFile.Name())
 }
 
-type Provider struct{}
+type Provider struct {
+	policy    Policy
+	hasPolicy bool
+}
 
+// New returns a bwrap provider that applies DefaultPolicy (the permissive dev
+// baseline).
 func New() *Provider {
 	return &Provider{}
+}
+
+// NewWithPolicy returns a bwrap provider that applies a specific per-agent Policy —
+// the enforce path (Phase 1), where Setup has assembled the agent's minimal rootfs,
+// provision binds, masks, and sealed env (E4.4/E4.6).
+func NewWithPolicy(p Policy) *Provider {
+	return &Provider{policy: p, hasPolicy: true}
 }
 
 func (p *Provider) Name() string {
@@ -51,12 +83,15 @@ func (p *Provider) Enter(ticketPath string, extraArgs []string) error {
 		return fmt.Errorf("failed to extract embedded bwrap: %w", err)
 	}
 
-	// Isolation args come from the translation layer (E4.2). DefaultPolicy is
-	// behavior-preserving (== the former hardcoded set); E4.4 will pass a per-agent
-	// Policy instead. The ticket bind is the sandbox handshake (mechanism), not
-	// isolation policy, so it is appended here rather than in the Policy.
+	// Isolation args come from the translation layer (E4.2): the per-agent Policy
+	// when Setup provided one, else DefaultPolicy (dev baseline). The ticket bind is
+	// the sandbox handshake (mechanism), not isolation policy, so it is appended here.
+	policy := DefaultPolicy()
+	if p.hasPolicy {
+		policy = p.policy
+	}
 	bwrapArgs := []string{bwrapPath}
-	bwrapArgs = append(bwrapArgs, Translate(DefaultPolicy())...)
+	bwrapArgs = append(bwrapArgs, Translate(policy)...)
 	bwrapArgs = append(bwrapArgs, "--bind", ticketPath, ticketPath)
 
 	if len(extraArgs) > 0 {

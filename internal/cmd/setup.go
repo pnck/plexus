@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
 
 	"github.com/spf13/cobra"
+	"plexus/sandbox/bwrap"
 	"plexus/sandbox/caps"
 	"plexus/sandbox/egress"
 	"plexus/sandbox/netpol"
@@ -33,6 +35,16 @@ var (
 	setupPidsMax    int64
 	setupUID        int
 	setupGID        int
+
+	// Phase-1 bwrap Policy (fs / provision / env) — the values Setup assembles and
+	// hands to the agent via bwrap.EnvPolicy.
+	setupRoleCard  string
+	setupWorkspace string
+	setupState     string
+	setupHome      string
+	setupSystem    []string
+	setupMask      []string
+	setupClearenv  bool
 )
 
 // setupCmd is the privileged Phase-0 entry (flow doc §2): it centrally checks/raises
@@ -64,6 +76,30 @@ var setupCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+
+		// Assemble the Phase-1 bwrap Policy (fs view + provision + sealed env) and hand
+		// it to the agent's self-reexec via bwrap.EnvPolicy. System defaults to the
+		// whole rootfs (dev) unless narrowed with --ro-system. Empty provision Srcs are
+		// skipped by Translate.
+		system := setupSystem
+		if len(system) == 0 {
+			system = []string{"/"}
+		}
+		policyJSON, err := json.Marshal(bwrap.Policy{
+			System:   system,
+			Mask:     setupMask,
+			Clearenv: setupClearenv,
+			Provision: bwrap.Provision{
+				RoleCard:  bwrap.Bind{Src: setupRoleCard},
+				State:     bwrap.Bind{Src: setupState},
+				Workspace: bwrap.Bind{Src: setupWorkspace},
+				Home:      bwrap.Bind{Src: setupHome},
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("setup: marshal policy: %w", err)
+		}
+
 		plan := setup.Plan{
 			AgentID:   setupAgentID,
 			Netns:     setupNetns,
@@ -87,6 +123,7 @@ var setupCmd = &cobra.Command{
 				egress.EnvRelay+"="+setupRelay,
 				egress.EnvNetTCP+"="+setupNetTCP,
 				egress.EnvNetUDP+"="+setupNetUDP,
+				bwrap.EnvPolicy+"="+string(policyJSON),
 			),
 		}
 		return setup.Setup(plan, x) // execs the agent on success; returns only on error
@@ -127,4 +164,12 @@ func init() {
 	f.Int64Var(&setupPidsMax, "pids-max", 0, "cgroup pids.max (0 = unset)")
 	f.IntVar(&setupUID, "uid", 0, "agent uid inside the sandbox (0 = launcher's)")
 	f.IntVar(&setupGID, "gid", 0, "agent gid inside the sandbox")
+	// Phase-1 fs Policy (handed to the agent via bwrap.EnvPolicy).
+	f.StringVar(&setupRoleCard, "role-card", "", "host path of the role card to inject read-only")
+	f.StringVar(&setupWorkspace, "workspace", "", "host path of the agent workspace (writable)")
+	f.StringVar(&setupState, "state", "", "host path of the brain-private state dir (writable)")
+	f.StringVar(&setupHome, "home", "", "host path of the writable HOME")
+	f.StringSliceVar(&setupSystem, "ro-system", nil, "read-only base rootfs paths (default: whole /)")
+	f.StringSliceVar(&setupMask, "mask", nil, "sensitive host paths to hide behind tmpfs")
+	f.BoolVar(&setupClearenv, "clearenv", false, "seal the environment (only granted vars survive)")
 }
