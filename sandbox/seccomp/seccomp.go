@@ -26,11 +26,16 @@ func DefaultProfile() Profile {
 	return Profile{
 		DefaultAllow: true,
 		Syscalls: []string{
-			// namespaces / mount — container escape. clone3 is included because it can
-			// create namespaces like unshare (blocking only unshare leaves a hole); the
-			// new mount API (fsopen/…/open_tree) is a second mount path the old `mount`
-			// block would otherwise miss.
-			"mount", "umount2", "unshare", "clone3", "setns", "pivot_root", "chroot",
+			// namespaces / mount — container escape. The new mount API
+			// (fsopen/…/open_tree) is a second mount path the old `mount` block would
+			// otherwise miss. NOTE: clone3 is deliberately NOT here — this denylist
+			// returns EPERM, but glibc>=2.34 issues clone3 for pthread_create and only
+			// falls back to clone on ENOSYS, so an EPERM'd clone3 breaks thread creation
+			// in glibc-linked children. unshare/setns are blocked, and a namespace made
+			// via clone3 is an empty dead-end (no veth/route, flow doc §6.7), so the
+			// escape surface is already covered. A proper ENOSYS-for-clone3 (the Docker
+			// approach) needs per-syscall actions / the OCI allowlist port (deferred).
+			"mount", "umount2", "unshare", "setns", "pivot_root", "chroot",
 			"fsopen", "fsconfig", "fsmount", "move_mount", "open_tree",
 			// io_uring — it can perform fs/net operations that never surface as filtered
 			// syscalls (a well-known seccomp bypass), so deny setup outright.
