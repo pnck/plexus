@@ -4,9 +4,10 @@ package setup
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 
+	"plexus/sandbox/cgroup"
 	"plexus/sandbox/netpol"
 )
 
@@ -337,30 +339,20 @@ func be16(v int) []byte {
 // CreateCgroup makes a cgroup-v2 group and writes its limits; a zero limit is left
 // at the parent default.
 func (x *OSExecutor) CreateCgroup(name string, lim CgroupLimits) error {
-	base := "/sys/fs/cgroup/" + name
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		return fmt.Errorf("mkdir cgroup %s: %w", base, err)
-	}
-	write := func(file, val string) error {
-		if val == "" {
+	// Reuse the E4.3 cgroup layer instead of a raw top-level mkdir: it creates the
+	// group UNDER this process's own cgroup, sets memory/pids, joins this process (so
+	// the exec'd agent inherits it), and — crucially — degrades to ErrUnavailable
+	// when no delegated cgroup-v2 subtree is writable (e.g. an unprivileged
+	// container), so Setup falls back to the rlimit floor rather than failing.
+	// (CPUMax is not yet handled by the shared cgroup layer.)
+	if _, err := cgroup.Apply(name, cgroup.Limits{MemoryMax: lim.MemoryMax, PidsMax: lim.PidsMax}); err != nil {
+		if errors.Is(err, cgroup.ErrUnavailable) {
+			slog.Warn("setup: cgroup delegation unavailable — relying on the rlimit floor", "agent", name)
 			return nil
 		}
-		if err := os.WriteFile(base+"/"+file, []byte(val), 0o644); err != nil {
-			return fmt.Errorf("write %s/%s: %w", base, file, err)
-		}
-		return nil
+		return err
 	}
-	if lim.MemoryMax > 0 {
-		if err := write("memory.max", strconv.FormatInt(lim.MemoryMax, 10)); err != nil {
-			return err
-		}
-	}
-	if lim.PidsMax > 0 {
-		if err := write("pids.max", strconv.FormatInt(lim.PidsMax, 10)); err != nil {
-			return err
-		}
-	}
-	return write("cpu.max", lim.CPUMax)
+	return nil
 }
 
 // EnterAndExec joins the prepared netns + cgroup, opens the IP_TRANSPARENT egress
@@ -368,7 +360,7 @@ func (x *OSExecutor) CreateCgroup(name string, lim CgroupLimits) error {
 // inherited fds, then execs the agent — replacing this process, so its parent stays
 // the caller (the persistent CP). The OS thread is locked so the netns setns binds
 // the thread that immediately execs.
-func (x *OSExecutor) EnterAndExec(name, cgroup string, egressPort int, argv, env []string) error {
+func (x *OSExecutor) EnterAndExec(name, _ string, egressPort int, argv, env []string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("empty argv")
 	}
@@ -400,12 +392,8 @@ func (x *OSExecutor) EnterAndExec(name, cgroup string, egressPort int, argv, env
 		)
 	}
 
-	if cgroup != "" {
-		procs := "/sys/fs/cgroup/" + cgroup + "/cgroup.procs"
-		if err := os.WriteFile(procs, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
-			return fmt.Errorf("join cgroup %s: %w", cgroup, err)
-		}
-	}
+	// The cgroup was created and JOINED in CreateCgroup (same process, via
+	// cgroup.Apply), so the exec'd agent already inherits it — nothing to do here.
 	bin, err := exec.LookPath(argv[0])
 	if err != nil {
 		return fmt.Errorf("lookpath %s: %w", argv[0], err)
