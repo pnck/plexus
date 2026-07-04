@@ -29,7 +29,10 @@ func TestApplyRlimits(t *testing.T) {
 		if err := ApplyRlimits(Rlimits{}); err != nil {
 			t.Fatalf("child ApplyRlimits(zero): %v", err)
 		}
-		if unix.Getrlimit(unix.RLIMIT_NOFILE, &r); r.Cur != 128 {
+		if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &r); err != nil {
+			t.Fatalf("child Getrlimit (post-zero): %v", err)
+		}
+		if r.Cur != 128 {
 			t.Fatalf("zero Rlimits changed NOFILE to %d", r.Cur)
 		}
 		return

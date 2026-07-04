@@ -122,7 +122,7 @@ func (x *OSExecutor) SetAddr(name, iface, cidr string) error {
 	if err != nil {
 		return err
 	}
-	defer h.Delete()
+	defer h.Close()
 	link, err := h.LinkByName(iface)
 	if err != nil {
 		return fmt.Errorf("find %s: %w", iface, err)
@@ -135,7 +135,7 @@ func (x *OSExecutor) SetLinkUp(name, iface string) error {
 	if err != nil {
 		return err
 	}
-	defer h.Delete()
+	defer h.Close()
 	link, err := h.LinkByName(iface)
 	if err != nil {
 		return fmt.Errorf("find %s: %w", iface, err)
@@ -152,7 +152,7 @@ func (x *OSExecutor) AddDefaultRoute(name, gateway string) error {
 	if err != nil {
 		return err
 	}
-	defer h.Delete()
+	defer h.Close()
 	return h.RouteAdd(&netlink.Route{Gw: gw}) // Dst nil => default route
 }
 
@@ -178,7 +178,7 @@ func (x *OSExecutor) applyReroute(name string, params netpol.Params) error {
 	if err != nil {
 		return err
 	}
-	defer h.Delete()
+	defer h.Close()
 
 	rule := netlink.NewRule()
 	rule.Mark = params.Mark

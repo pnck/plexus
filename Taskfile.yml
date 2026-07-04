@@ -25,4 +25,8 @@ tasks:
   lint:
     desc: Run golangci-lint
     cmds:
-      - go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run
+      # Pinned + generous timeout: `@latest` is non-reproducible and the default 1m
+      # analysis deadline is blown loading the modernc sqlite/libc packages on a cold
+      # cache (what turned CI red). Compiled by the local Go toolchain, so its go/types
+      # matches the module's Go version.
+      - go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 run --timeout=10m

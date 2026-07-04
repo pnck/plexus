@@ -56,10 +56,10 @@ func TestSOCKS5ConnectRefused(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 	go func() {
-		io.ReadFull(server, make([]byte, 3))
-		server.Write([]byte{0x05, 0x00})
-		io.ReadFull(server, make([]byte, 10))
-		server.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // REP=5 refused
+		_, _ = io.ReadFull(server, make([]byte, 3))
+		_, _ = server.Write([]byte{0x05, 0x00})
+		_, _ = io.ReadFull(server, make([]byte, 10))
+		_, _ = server.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // REP=5 refused
 	}()
 	if err := SOCKS5Connect(client, &net.TCPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 80}); err == nil {
 		t.Fatal("refusal must be an error")

@@ -96,8 +96,7 @@ func runNode(ctx context.Context) error {
 	// isolation — a distinct brain/history per task — is a later concern, E5.)
 	inbox := make(chan protocol.Message, 64)
 	workerDone := make(chan struct{})
-	var node *mesh.Node
-	node = mesh.NewNode(agentID,
+	node := mesh.NewNode(agentID,
 		mesh.WithNatsURL(trunkURL(trunkAddr)),
 		mesh.WithOnMessage(func(msg protocol.Message) {
 			select {
