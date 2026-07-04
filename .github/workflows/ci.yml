@@ -3,27 +3,140 @@ name: Plexus CI
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.25'
+  # bwrap (bubblewrap) source tag; bump to embed a newer sandbox helper.
+  BUBBLEWRAP_VERSION: v0.11.2
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  lint:
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: go-task/setup-task@v2
+        with:
+          version: '3.x'
+      - name: Lint
+        run: task lint
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.25'
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: go-task/setup-task@v2
+        with:
+          version: '3.x'
+      - name: Test
+        run: task test
 
-    - name: Install Task
-      uses: go-task/setup-task@v2
-      with:
-        version: '3.x'
+  # Build a self-contained plexus binary per architecture, each embedding the
+  # matching-arch bwrap. plexus is pure Go (modernc sqlite, no cgo) so the Go build
+  # runs natively on each arch runner; bwrap is a C program, built as a fully-static
+  # musl binary in an Alpine container of the same arch (no QEMU, no cross toolchain).
+  build:
+    name: build (${{ matrix.arch }})
+    needs: [ lint, test ]
+    permissions:
+      contents: write   # attach binaries to the GitHub Release on tag pushes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
-    - name: Lint
-      run: task lint
+      # The embedded bwrap is a fully-static (musl) build, so the single plexus binary
+      # runs on any Linux host. Cache it per (version, arch) — only pay the compile once.
+      - name: Cache static bwrap
+        id: bwrap-cache
+        uses: actions/cache@v4
+        with:
+          path: sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}
+          key: bwrap-${{ env.BUBBLEWRAP_VERSION }}-${{ matrix.arch }}-musl-static-v1
 
-    - name: Test
-      run: task test
+      - name: Build static bwrap (${{ matrix.arch }})
+        if: steps.bwrap-cache.outputs.cache-hit != 'true'
+        run: |
+          docker run --rm \
+            -e BUBBLEWRAP_VERSION="${BUBBLEWRAP_VERSION}" \
+            -e ARCH="${{ matrix.arch }}" \
+            -v "$PWD:/work" -w /work \
+            alpine:3.21 sh -euxc '
+              apk add --no-cache build-base meson samurai pkgconf \
+                libcap-dev libcap-static linux-headers git
+              git clone --depth 1 --branch "$BUBBLEWRAP_VERSION" \
+                https://github.com/containers/bubblewrap /tmp/bwrap-src
+              cd /tmp/bwrap-src
+              meson setup _build \
+                --buildtype=release \
+                --prefer-static \
+                -Db_pie=false \
+                -Ddefault_library=static \
+                -Dc_link_args=-static \
+                -Dselinux=disabled \
+                -Dman=disabled \
+                -Dtests=false \
+                -Dbash_completion=disabled \
+                -Dzsh_completion=disabled
+              meson compile -C _build
+              install -Dm755 _build/bwrap "/work/sandbox/bwrap/bin/bwrap_linux_${ARCH}"
+              file  "/work/sandbox/bwrap/bin/bwrap_linux_${ARCH}"
+              "/work/sandbox/bwrap/bin/bwrap_linux_${ARCH}" --version
+            '
+
+      - name: Verify embedded bwrap is present and non-empty
+        run: |
+          f="sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}"
+          test -s "$f" || { echo "::error::$f is empty — bwrap build failed"; exit 1; }
+          ls -la "$f"
+
+      - name: Build plexus (${{ matrix.arch }})
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' \
+            -o "dist/plexus-linux-${{ matrix.arch }}" ./internal/bin/plexus
+          ls -la dist/
+
+      # The runner arch matches matrix.arch, so the freshly built binary runs here.
+      - name: Smoke — binary starts
+        run: ./dist/plexus-linux-${{ matrix.arch }} --help >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexus-linux-${{ matrix.arch }}
+          path: dist/plexus-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}" || true
+          gh release upload "${GITHUB_REF_NAME}" "dist/plexus-linux-${{ matrix.arch }}" --clobber
