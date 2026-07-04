@@ -136,5 +136,8 @@ func (p Policy) readOnly() string {
 	if rc := p.Provision.roleCardDest(); rc != "" {
 		ro = append(ro, rc)
 	}
+	if dns := p.Provision.resolvConfDest(); dns != "" {
+		ro = append(ro, dns)
+	}
 	return strings.Join(ro, ", ")
 }

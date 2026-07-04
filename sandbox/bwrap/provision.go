@@ -103,6 +103,14 @@ func (pv Provision) roleCardDest() string {
 	return destOf(pv.RoleCard, RoleCardPath)
 }
 
+// resolvConfDest is the sandbox-side resolv.conf path (read-only), or "".
+func (pv Provision) resolvConfDest() string {
+	if pv.ResolvConf.Src == "" {
+		return ""
+	}
+	return destOf(pv.ResolvConf, ResolvConfPath)
+}
+
 // withDest returns b with its Dest defaulted to def when empty.
 func withDest(b Bind, def string) Bind {
 	if b.Dest == "" {
