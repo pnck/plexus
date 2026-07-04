@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"plexus/pkg/agent"
@@ -94,6 +95,7 @@ func runNode(ctx context.Context) error {
 	// goroutine drains the queue and drives Brain.Handle SERIALLY. (Per-TaskID
 	// isolation — a distinct brain/history per task — is a later concern, E5.)
 	inbox := make(chan protocol.Message, 64)
+	workerDone := make(chan struct{})
 	var node *mesh.Node
 	node = mesh.NewNode(agentID,
 		mesh.WithNatsURL(trunkURL(trunkAddr)),
@@ -105,6 +107,7 @@ func runNode(ctx context.Context) error {
 		}),
 	)
 	go func() {
+		defer close(workerDone)
 		for {
 			select {
 			case <-ctx.Done():
@@ -126,7 +129,14 @@ func runNode(ctx context.Context) error {
 		}
 	}()
 	slog.Info("Starting plexus agent", "id", agentID, "sandboxed", sandboxed)
-	return node.Run(ctx)
+	err = node.Run(ctx)
+	// ctx is cancelled; let the worker finish its in-flight turn before the deferred
+	// ag.Close() tears down the brain-private DB (avoids a "database is closed" race).
+	select {
+	case <-workerDone:
+	case <-time.After(5 * time.Second):
+	}
+	return err
 }
 
 // sandboxEnvState renders the sandbox environment-state L1 frame for a provisioned
