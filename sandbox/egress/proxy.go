@@ -103,8 +103,19 @@ func (p *Proxy) handleTCP(client net.Conn) error {
 	if err := SOCKS5Connect(up, orig); err != nil {
 		return err
 	}
+	// Keepalive reaps a genuinely-dead half-open flow (peer gone after shutdown(WR))
+	// without cutting a live-but-idle stream (a slow LLM reply keeps answering probes).
+	setKeepAlive(client)
+	setKeepAlive(up)
 	pipe(client, up)
 	return nil
+}
+
+func setKeepAlive(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(30 * time.Second)
+	}
 }
 
 // pipe copies bidirectionally. When one direction reaches EOF it half-closes the

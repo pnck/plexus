@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 
@@ -102,11 +101,16 @@ var setupCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			path := filepath.Join(os.TempDir(), "plexus-setup-"+setupAgentID+"-resolv.conf")
-			if err := os.WriteFile(path, []byte(rc), 0o644); err != nil {
+			f, err := os.CreateTemp("", "plexus-resolv-*.conf")
+			if err != nil {
+				return fmt.Errorf("setup: create resolv.conf: %w", err)
+			}
+			if _, err := f.WriteString(rc); err != nil {
+				_ = f.Close()
 				return fmt.Errorf("setup: write resolv.conf: %w", err)
 			}
-			provision.ResolvConf = bwrap.Bind{Src: path}
+			_ = f.Close()
+			provision.ResolvConf = bwrap.Bind{Src: f.Name()}
 		}
 		policyJSON, err := json.Marshal(bwrap.Policy{
 			System:    system,
