@@ -81,24 +81,43 @@ func runNode(ctx context.Context) error {
 	}
 	defer ag.Close()
 
+	// The mesh delivers each message on its OWN goroutine, but a *brain.Brain is a
+	// single-conversation actor with no internal locking — driving it concurrently
+	// would race its history/current-task. So the callback only enqueues; one worker
+	// goroutine drains the queue and drives Brain.Handle SERIALLY. (Per-TaskID
+	// isolation — a distinct brain/history per task — is a later concern, E5.)
+	inbox := make(chan protocol.Message, 64)
 	var node *mesh.Node
 	node = mesh.NewNode(agentID,
 		mesh.WithNatsURL(trunkURL(trunkAddr)),
 		mesh.WithOnMessage(func(msg protocol.Message) {
-			reply, herr := ag.Brain.Handle(context.Background(), msg)
-			if herr != nil {
-				slog.Error("run: brain handle", "err", herr)
-				return
+			select {
+			case inbox <- msg:
+			case <-ctx.Done():
 			}
-			_ = node.SendRaw(context.Background(), "sys.report", protocol.Message{
-				Sender:  agentID,
-				Target:  msg.Sender,
-				Type:    protocol.TypeReport,
-				TaskID:  msg.TaskID,
-				Payload: []byte(reply),
-			})
 		}),
 	)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-inbox:
+				reply, herr := ag.Brain.Handle(ctx, msg)
+				if herr != nil {
+					slog.Error("run: brain handle", "err", herr)
+					continue
+				}
+				_ = node.SendRaw(ctx, "sys.report", protocol.Message{
+					Sender:  agentID,
+					Target:  msg.Sender,
+					Type:    protocol.TypeReport,
+					TaskID:  msg.TaskID,
+					Payload: []byte(reply),
+				})
+			}
+		}
+	}()
 	slog.Info("Starting plexus agent", "id", agentID, "sandboxed", sandboxed)
 	return node.Run(ctx)
 }
