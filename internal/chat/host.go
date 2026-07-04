@@ -137,6 +137,13 @@ func NewHost(ctx context.Context, agentID string, cfg Config, nodeOpts ...mesh.O
 		h.gw.setRawObs(func(b []byte) { _ = h.node.Observe(context.Background(), "raw", b) })
 	}
 
+	// chat's task channel rejects task_* (the standing task is open-ended), and the
+	// zero role card falls back to chat's default — set both before assembly since
+	// the shared agent.New no longer knows chat's conventions.
+	cfg.Emitter = rejectEmitter{}
+	if cfg.RoleCard.IsZero() {
+		cfg.RoleCard = DefaultRoleCard()
+	}
 	agent, err := New(ctx, cfg)
 	if err != nil {
 		return nil, err

@@ -166,7 +166,7 @@ func (h *Host) status() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "provider=%s model=%s key=%s state=%s", cfg.Provider, cfg.Model, key, state)
 	if cfg.BaseURL != "" {
-		fmt.Fprintf(&b, " base-url=%s", normalizeBaseURL(cfg.Provider, cfg.BaseURL))
+		fmt.Fprintf(&b, " base-url=%s", cfg.BaseURL)
 	}
 	if cfg.Reasoning != "" {
 		fmt.Fprintf(&b, " reasoning=%s", cfg.Reasoning)

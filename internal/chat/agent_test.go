@@ -58,7 +58,7 @@ func (g *fakeGateway) GenerateStream(_ context.Context, msgs []llm.Message, _ []
 
 func newAgent(t *testing.T, gw llm.Provider) *Agent {
 	t.Helper()
-	a, err := New(context.Background(), Config{Gateway: gw, DBPath: ":memory:"})
+	a, err := New(context.Background(), Config{Gateway: gw, DBPath: ":memory:", RoleCard: DefaultRoleCard(), Emitter: rejectEmitter{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAssembledAgentRunsEffector(t *testing.T) {
 	}}
 	a := newAgent(t, gw)
 
-	out, err := a.Handle(context.Background(), "hello")
+	out, err := a.Handle(context.Background(), DefaultTaskID, "hello")
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -117,12 +117,12 @@ func TestAssembledAgentRejectsTaskRevert(t *testing.T) {
 	}}
 	a := newAgent(t, gw)
 
-	if _, err := a.Handle(context.Background(), "revert please"); err != nil {
+	if _, err := a.Handle(context.Background(), DefaultTaskID, "revert please"); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	var sawReject bool
 	for _, f := range a.Brain.History() {
-		if strings.Contains(f.Content, "not available in chat") {
+		if strings.Contains(f.Content, "task_report/task_revert are unavailable") {
 			sawReject = true
 		}
 	}
@@ -144,7 +144,7 @@ func TestAssembledAgentDelegates(t *testing.T) {
 	}
 	a := newAgent(t, gw)
 
-	out, err := a.Handle(context.Background(), "survey the repo")
+	out, err := a.Handle(context.Background(), DefaultTaskID, "survey the repo")
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

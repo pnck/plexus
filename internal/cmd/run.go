@@ -6,10 +6,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"plexus/pkg/agent"
+	"plexus/pkg/brain"
 	"plexus/pkg/mesh"
+	"plexus/protocol"
 	"plexus/sandbox"
 	"plexus/sandbox/bwrap"
 	"plexus/sandbox/egress"
@@ -40,11 +44,74 @@ var runCmd = &cobra.Command{
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		slog.Info("Starting plexus daemon", "id", agentID, "sandboxed", sandboxed)
-		a := mesh.NewNode(agentID, mesh.WithNatsURL(trunkURL(trunkAddr)))
-
-		return a.Run(ctx)
+		return runNode(ctx)
 	},
+}
+
+// runNode connects to the trunk and — when an LLM gateway is configured — hosts a
+// fully assembled agent (brain + effectors + memory) driven off bus messages, the
+// Phase-2 runtime (flow doc §4): it reads the role card from the provisioned path
+// and drives Brain.Handle on each incoming message. Without a gateway it stays a
+// bare mesh node (unchanged) so the daemon still runs for brain-less mesh work.
+func runNode(ctx context.Context) error {
+	gw, gwErr := agent.ResolveGateway("", "", "", "", false).Build()
+	if gwErr != nil {
+		slog.Warn("run: no LLM gateway configured — running as a bare mesh node", "err", gwErr)
+		node := mesh.NewNode(agentID, mesh.WithNatsURL(trunkURL(trunkAddr)))
+		slog.Info("Starting plexus daemon", "id", agentID, "sandboxed", sandboxed)
+		return node.Run(ctx)
+	}
+
+	// Role card from the provisioned (read-only) path — the runtime side of E4.4; a
+	// zero card is fine when unprovisioned (dev).
+	roleCard, err := brain.LoadRoleCard(bwrap.RoleCardPath)
+	if err != nil {
+		slog.Info("run: no provisioned role card, using the zero card", "path", bwrap.RoleCardPath, "err", err)
+	}
+
+	ag, err := agent.New(ctx, agent.Config{
+		Gateway:  gw,
+		DBPath:   brainDBPath(agentID),
+		RoleCard: roleCard,
+		// run_command stays off until the approval/yield path is wired for headless
+		// agents (E5); the approval-free builtins cover ordinary work.
+	})
+	if err != nil {
+		return fmt.Errorf("run: assemble agent: %w", err)
+	}
+	defer ag.Close()
+
+	var node *mesh.Node
+	node = mesh.NewNode(agentID,
+		mesh.WithNatsURL(trunkURL(trunkAddr)),
+		mesh.WithOnMessage(func(msg protocol.Message) {
+			reply, herr := ag.Brain.Handle(context.Background(), msg)
+			if herr != nil {
+				slog.Error("run: brain handle", "err", herr)
+				return
+			}
+			_ = node.SendRaw(context.Background(), "sys.report", protocol.Message{
+				Sender:  agentID,
+				Target:  msg.Sender,
+				Type:    protocol.TypeReport,
+				TaskID:  msg.TaskID,
+				Payload: []byte(reply),
+			})
+		}),
+	)
+	slog.Info("Starting plexus agent", "id", agentID, "sandboxed", sandboxed)
+	return node.Run(ctx)
+}
+
+// brainDBPath is the brain-private SQLite path for a run agent: the provisioned
+// writable state dir inside the sandbox, or a per-agent temp path in dev.
+func brainDBPath(id string) string {
+	if fi, err := os.Stat(bwrap.StateDir); err == nil && fi.IsDir() {
+		return filepath.Join(bwrap.StateDir, "brain.db")
+	}
+	dir := filepath.Join(os.TempDir(), "plexus-run", id)
+	_ = os.MkdirAll(dir, 0o700)
+	return filepath.Join(dir, "brain.db")
 }
 
 func init() {
