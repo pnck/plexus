@@ -1,6 +1,6 @@
-// Package netpol models an agent's network sandbox policy (E4.5): the per-role
-// egress rules declared in the role card's `network` section, and the pure
-// functions that lower a policy into nftables / ip-rule text (nftgen.go).
+// Package netpol models an agent's network sandbox policy (E4.5): the per-agent
+// egress rules and the pure functions that lower a policy into nftables / ip-rule
+// text (nftgen.go).
 //
 // Model (docs/implement-design.md §5.6.7, tracking/E4-establishment-flow.md §6):
 // default deny-all; each transport protocol (tcp/udp) gets an action in
@@ -9,8 +9,11 @@
 // TCP/UDP is transparently intercepted via TPROXY to plexus's local egress port
 // and relayed out through the control plane's EgressRelay.
 //
-// This is a leaf types package (stdlib + yaml only). The role card carries a
-// *NetPolicy; the brain does not render or gate on it — Setup consumes it.
+// This is a leaf types package (stdlib + yaml only). NetPolicy is IMMUTABLE launch
+// config (injected at start, consumed by Setup) — NOT a role-card field: the role
+// card is soft LLM-facing guidance, while this is a hard sandbox switch the agent
+// cannot change. The brain does not render or gate on it (the LLM sees only the
+// rendered limits via sandbox.Environment.Describe()).
 package netpol
 
 import (
@@ -53,7 +56,7 @@ func parseAction(s string) (NetAction, error) {
 	}
 }
 
-// UnmarshalYAML lets a NetPolicy field accept the role-card token directly.
+// UnmarshalYAML lets a NetAction field accept the startup-config token directly.
 func (a *NetAction) UnmarshalYAML(n *yaml.Node) error {
 	var s string
 	if err := n.Decode(&s); err != nil {
@@ -142,9 +145,9 @@ func (p Proto) String() string {
 	return "tcp"
 }
 
-// NetPolicy is the role card's `network` section: a per-protocol egress action
-// plus a log scope. The zero value is fully denied and unaudited — the safe
-// baseline for a role that declares no `network` at all.
+// NetPolicy is the `network` section of the immutable startup config: a per-protocol
+// egress action plus a log scope. The zero value is fully denied and unaudited — the
+// safe baseline for an agent granted no `network` at all.
 type NetPolicy struct {
 	TCP NetAction `yaml:"tcp"`
 	UDP NetAction `yaml:"udp"`
