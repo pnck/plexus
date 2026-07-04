@@ -164,6 +164,10 @@ func (p NetPolicy) Decide(proto Proto) NetAction {
 // logs reports whether egress on a protocol is audited.
 func (p NetPolicy) logs(proto Proto) bool { return p.Log.logs(proto) }
 
+// Logs is the exported form of logs, for the fence builders (nftgen / the programmatic
+// executor) that need to know which protocols to attach a `log` to.
+func (p NetPolicy) Logs(proto Proto) bool { return p.logs(proto) }
+
 // Parse decodes a startup network config (YAML) into a NetPolicy. Missing fields
 // default to Drop (action) / Off (log) — i.e. deny-all. Invalid tokens are an
 // error. NetPolicy is immutable launch config (injected at start, consumed by

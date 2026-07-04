@@ -233,20 +233,51 @@ func (x *OSExecutor) applyNFT(name string, policy netpol.NetPolicy, params netpo
 		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)},
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	})
-	// TODO(E4.6.4.2): ct count over N drop (needs an anonymous {tcp,udp} set) and the
-	// per-protocol `log` lines — refinements over the deny-all core below.
+	// ct state new meta l4proto {tcp,udp} ct count over N drop — one shared per-agent
+	// concurrency cap across both protocols (an anonymous set gives a single counter).
+	if params.MaxConns > 0 {
+		set := &nftables.Set{Table: table, Anonymous: true, Constant: true, KeyType: nftables.TypeInetProto}
+		if err := c.AddSet(set, []nftables.SetElement{
+			{Key: []byte{unix.IPPROTO_TCP}},
+			{Key: []byte{unix.IPPROTO_UDP}},
+		}); err != nil {
+			return err
+		}
+		add([]expr.Any{
+			&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
+			&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4,
+				Mask: binaryutil.NativeEndian.PutUint32(expr.CtStateBitNEW),
+				Xor:  binaryutil.NativeEndian.PutUint32(0)},
+			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)},
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID},
+			&expr.Connlimit{Count: uint32(params.MaxConns), Flags: 1}, // Flags 1 = over (invert)
+			&expr.Verdict{Kind: expr.VerdictDrop},
+		})
+	}
 
-	// per-protocol disposition
-	add(protoRule(unix.IPPROTO_TCP, policy.Decide(netpol.TCP), params.Mark, true))
-	add(protoRule(unix.IPPROTO_UDP, policy.Decide(netpol.UDP), params.Mark, false))
+	// per-protocol disposition (+ optional log)
+	add(protoRule(unix.IPPROTO_TCP, policy.Decide(netpol.TCP), params.Mark, true, policy.Logs(netpol.TCP)))
+	add(protoRule(unix.IPPROTO_UDP, policy.Decide(netpol.UDP), params.Mark, false, policy.Logs(netpol.UDP)))
 
 	return c.Flush()
 }
 
 // protoRule mirrors netpol.protoRule: redirect -> set the TPROXY mark and accept;
-// reject -> refuse (tcp reset / icmp); drop -> no rule (falls through to policy drop).
-func protoRule(proto uint8, action netpol.NetAction, mark uint32, tcp bool) []expr.Any {
+// reject -> refuse (tcp reset / icmp); drop -> no rule unless logging (then log+drop),
+// otherwise it falls through to the chain policy drop. A `log` prefixes the line.
+func protoRule(proto uint8, action netpol.NetAction, mark uint32, tcp, log bool) []expr.Any {
+	if action == netpol.Drop && !log {
+		return nil // falls through to policy drop
+	}
 	e := l4proto(proto)
+	if log {
+		name := "udp"
+		if tcp {
+			name = "tcp"
+		}
+		e = append(e, &expr.Log{Key: 1 << unix.NFTA_LOG_PREFIX, Data: []byte("egress-" + name + " ")})
+	}
 	switch action {
 	case netpol.Redirect:
 		return append(e,
@@ -259,8 +290,8 @@ func protoRule(proto uint8, action netpol.NetAction, mark uint32, tcp bool) []ex
 			return append(e, &expr.Reject{Type: unix.NFT_REJECT_TCP_RST})
 		}
 		return append(e, &expr.Reject{Type: unix.NFT_REJECT_ICMP_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})
-	default: // Drop -> chain policy drops it
-		return nil
+	default: // Drop with logging -> log then drop
+		return append(e, &expr.Verdict{Kind: expr.VerdictDrop})
 	}
 }
 
