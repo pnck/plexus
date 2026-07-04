@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -92,6 +93,23 @@ func (p *Provider) Enter(ticketPath string, extraArgs []string) error {
 	}
 	bwrapArgs := []string{bwrapPath}
 	bwrapArgs = append(bwrapArgs, Translate(policy)...)
+
+	// --clearenv (from a sealed-env Policy) drops EVERYTHING, including the sandbox's
+	// own control channel — the ticket, the per-agent Policy, and the egress fd /
+	// network env Setup handed down. Re-inject the PLEXUS_ infra namespace after the
+	// clear (later --setenv wins) so sealing the agent's env doesn't brick the
+	// handshake or the egress proxy. Only PLEXUS_ vars survive; host secrets are still
+	// dropped.
+	if policy.Clearenv {
+		for _, kv := range os.Environ() {
+			if strings.HasPrefix(kv, "PLEXUS_") {
+				if k, v, ok := strings.Cut(kv, "="); ok {
+					bwrapArgs = append(bwrapArgs, "--setenv", k, v)
+				}
+			}
+		}
+	}
+
 	bwrapArgs = append(bwrapArgs, "--bind", ticketPath, ticketPath)
 
 	if len(extraArgs) > 0 {
