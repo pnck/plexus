@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	"plexus/sandbox/caps"
@@ -46,6 +47,12 @@ var setupCmd = &cobra.Command{
 		if len(args) == 0 {
 			return fmt.Errorf("setup: provide the agent command after --, e.g. `plexus setup … -- plexus run --sandbox`")
 		}
+
+		// capset raises EFFECTIVE on the calling THREAD only, so lock the goroutine to
+		// its OS thread and keep all the privileged setup on it — otherwise Go could
+		// migrate the goroutine to a thread whose caps were never raised (invisible as
+		// root, but it breaks the non-root `setcap …+p` deployment).
+		runtime.LockOSThread()
 
 		// Central, up-front capability check: union every participant's needs (the
 		// visitor over Setup + the egress proxy) and raise them once.

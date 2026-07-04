@@ -25,6 +25,9 @@ func Ensure(want Set) error {
 	}
 	var missing []Cap
 	for _, c := range want.List() {
+		if int(c) < 0 || int(c) >= 64 {
+			return fmt.Errorf("caps: capability %d out of range (v3 covers 0..63)", int(c))
+		}
 		idx, bit := int(c)/32, uint(int(c)%32)
 		if data[idx].Permitted&(uint32(1)<<bit) == 0 {
 			missing = append(missing, c)
