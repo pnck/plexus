@@ -95,6 +95,7 @@ jobs:
                 -Db_pie=false \
                 -Ddefault_library=static \
                 -Dc_link_args=-static \
+                -Dc_args=-Wno-format-overflow \
                 -Dselinux=disabled \
                 -Dman=disabled \
                 -Dtests=false \
