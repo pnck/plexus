@@ -8,6 +8,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Missing reports which of the wanted capabilities are NOT in the process's
+// PERMITTED set — i.e. the ones Ensure could not raise. It reads caps without
+// changing them, so a preflight can aggregate every unmet requirement into one
+// report before failing. If capget itself fails, every wanted cap is reported
+// missing (fail-closed).
+func Missing(want Set) Set {
+	if want.Empty() {
+		return Of()
+	}
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: 0}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		return want
+	}
+	var miss []Cap
+	for _, c := range want.List() {
+		if int(c) < 0 || int(c) >= 64 {
+			miss = append(miss, c)
+			continue
+		}
+		idx, bit := int(c)/32, uint(int(c)%32)
+		if data[idx].Permitted&(uint32(1)<<bit) == 0 {
+			miss = append(miss, c)
+		}
+	}
+	return Of(miss...)
+}
+
 // Ensure raises every capability in want from the process's PERMITTED set into its
 // EFFECTIVE set, so the privileged setup calls succeed. It is fail-closed: if a
 // wanted capability is not permitted, it changes nothing and returns an error naming

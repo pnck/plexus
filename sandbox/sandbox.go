@@ -12,6 +12,11 @@ type Provider interface {
 	Enter(ticketPath string, extraArgs []string) error
 }
 
+// EnvTicket names the one-time handover ticket path. Its presence in the environment
+// is how a process knows it is already INSIDE the sandbox (Phase 2) rather than on
+// the host — the sandbox-entry state machine keys on it.
+const EnvTicket = "PLEXUS_SANDBOX_TICKET"
+
 // EnterIfRequested evaluates the sandbox flag and the current execution state.
 // - If sandboxed == false, it returns immediately.
 // - If on Host: it generates the ticket, calls the provider, and syscall.Execs.
@@ -25,7 +30,7 @@ func EnterIfRequested(sandboxed bool, provider Provider, extraArgs []string) err
 		return fmt.Errorf("sandbox mode requested but no sandbox provider was configured")
 	}
 
-	ticketPath := os.Getenv("PLEXUS_SANDBOX_TICKET")
+	ticketPath := os.Getenv(EnvTicket)
 	if ticketPath == "" {
 		// --- HOST PHASE ---
 
@@ -35,7 +40,7 @@ func EnterIfRequested(sandboxed bool, provider Provider, extraArgs []string) err
 			return fmt.Errorf("failed to generate sandbox ticket: %w", err)
 		}
 
-		os.Setenv("PLEXUS_SANDBOX_TICKET", path)
+		os.Setenv(EnvTicket, path)
 
 		slog.Info("Hollowing out process and entering sandbox...", "provider", provider.Name(), "ticket", path)
 

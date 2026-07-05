@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,8 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"plexus/internal/chat"
 	"plexus/pkg/brain"
-	"plexus/sandbox"
-	"plexus/sandbox/bwrap"
+	"plexus/sandbox/egress"
 )
 
 var (
@@ -25,6 +25,7 @@ var (
 	chatAllowExec   bool
 	chatReasoning   string
 	chatWithSandbox bool
+	chatSandboxCfg  sandboxConfig
 )
 
 // chatCmd launches a fully assembled agent (brain + effector + delegation +
@@ -36,14 +37,24 @@ var chatCmd = &cobra.Command{
 	Use:   "chat",
 	Short: "Chat with a fully assembled plexus agent over the mesh",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// --with-sandbox re-execs chat into a bwrap sandbox before any setup. chat is
-		// single-process (embedded bus + in-process CP + brain), so this is fs/namespace
-		// hardening only: there is no per-agent CP EgressRelay to route through, so the
-		// network egress fence (a cluster concern, E4.5/E4.6) does not apply — chat keeps
-		// host network. On the host phase this syscall.Execs and never returns here.
-		if err := sandbox.EnterIfRequested(chatWithSandbox, bwrap.New(), nil); err != nil {
-			return err
+		// --sandbox drives the full sandbox flow (preflight + caps + Phase-0 fence +
+		// bwrap + self-confine) — the SAME entry every command uses; chat is not a
+		// special "lighter" mode. The host phases exec away and never return here; only
+		// the in-sandbox phase (post-confine) falls through to run the session.
+		if chatWithSandbox {
+			chatSandboxCfg.AgentID = "chat"
+			if err := enterSandbox(&chatSandboxCfg); err != nil {
+				return err
+			}
 		}
+
+		// Serve the transparent egress proxy on the sockets Phase-0 handed down (no-op
+		// when there is no netns fence, e.g. un-sandboxed chat).
+		stopEgress, err := egress.ServeInherited()
+		if err != nil {
+			return fmt.Errorf("egress proxy: %w", err)
+		}
+		defer stopEgress()
 
 		// A runtime-reconfigurable gateway: chat starts even without a key — the
 		// user sets one in-session with /key (no startup failure).
@@ -79,5 +90,6 @@ func init() {
 	chatCmd.Flags().StringVar(&chatReasoning, "reasoning", "", "Reasoning effort: minimal|low|medium|high|xhigh|max (mapped/clamped per provider; env PLEXUS_REASONING)")
 	chatCmd.Flags().IntVar(&chatTrunkPort, "trunk-port", 0, "Pin the embedded trunk (mesh bus) to a port; 0 auto-assigns a free one (printed at startup)")
 	chatCmd.Flags().BoolVar(&chatAllowExec, "allow-exec", false, "Enable the run_command effector (arbitrary shell; each call is approval-gated)")
-	chatCmd.Flags().BoolVar(&chatWithSandbox, "sandbox", false, "Run chat inside a strict bwrap sandbox (fs/namespace isolation)")
+	chatCmd.Flags().BoolVar(&chatWithSandbox, "sandbox", false, "Establish the full sandbox (fs/ns isolation + network fence + cgroup); flags below only tune it")
+	addSandboxFlags(chatCmd.Flags(), &chatSandboxCfg)
 }

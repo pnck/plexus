@@ -23,25 +23,28 @@ import (
 )
 
 var (
-	trunkAddr string
-	agentID   string
-	sandboxed bool
+	trunkAddr     string
+	agentID       string
+	sandboxed     bool
+	runSandboxCfg sandboxConfig
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the plexus mesh daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		provider, err := bwrap.ProviderFromEnv()
-		if err != nil {
-			return err
-		}
-		if err := sandbox.EnterIfRequested(sandboxed, provider, nil); err != nil {
-			return err
+		if sandboxed {
+			// --sandbox drives the whole sandbox flow (preflight + caps + Phase-0 fence +
+			// bwrap + self-confine) across re-execs. The host phases exec away and never
+			// return here; only the in-sandbox phase (post-confine) falls through to run.
+			runSandboxCfg.AgentID = agentID
+			if err := enterSandbox(&runSandboxCfg); err != nil {
+				return err
+			}
 		}
 
 		// Inside a per-agent netns, serve the transparent egress proxy on the sockets
-		// Setup handed down (no-op when there is no netns fence, e.g. dev/chat).
+		// Setup handed down (no-op when there is no netns fence).
 		stopEgress, err := egress.ServeInherited()
 		if err != nil {
 			return fmt.Errorf("egress proxy: %w", err)
@@ -175,5 +178,6 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	runCmd.Flags().StringVar(&trunkAddr, "trunk", "127.0.0.1:4222", "Trunk (mesh bus) address to connect to, host:port")
 	runCmd.Flags().StringVar(&agentID, "id", "agent-x", "Agent identity")
-	runCmd.Flags().BoolVar(&sandboxed, "sandbox", false, "Run the daemon inside a strict bwrap sandbox")
+	runCmd.Flags().BoolVar(&sandboxed, "sandbox", false, "Establish the full sandbox (fs/ns isolation + network fence + cgroup); flags below only tune it")
+	addSandboxFlags(runCmd.Flags(), &runSandboxCfg)
 }
