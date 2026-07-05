@@ -43,10 +43,12 @@ jobs:
       - name: Test
         run: task test
 
-  # Build a self-contained plexus binary per architecture, each embedding the
-  # matching-arch bwrap. plexus is pure Go (modernc sqlite, no cgo) so the Go build
-  # runs natively on each arch runner; bwrap is a C program, built as a fully-static
-  # musl binary in an Alpine container of the same arch (no QEMU, no cross toolchain).
+  # Build self-contained plexus binaries per architecture, in two variants: a release
+  # binary embedding an optimized bwrap, and a debug binary (-tags debug, Go symbols +
+  # no inlining) embedding a -O0 -g bwrap so the sandbox helper is debuggable too.
+  # plexus is pure Go (modernc sqlite, no cgo) so the Go build runs natively on each
+  # arch runner; bwrap is a C program, built as a fully-static musl binary in an Alpine
+  # container of the same arch (no QEMU, no cross toolchain).
   build:
     name: build (${{ matrix.arch }})
     needs: [ lint, test ]
@@ -67,16 +69,18 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      # The embedded bwrap is a fully-static (musl) build, so the single plexus binary
-      # runs on any Linux host. Cache it per (version, arch) — only pay the compile once.
+      # Both bwrap variants are fully-static (musl), so each plexus binary runs on any
+      # Linux host. Cache them per (version, arch) — only pay the compile once.
       - name: Cache static bwrap
         id: bwrap-cache
         uses: actions/cache@v4
         with:
-          path: sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}
-          key: bwrap-${{ env.BUBBLEWRAP_VERSION }}-${{ matrix.arch }}-musl-static-v1
+          path: |
+            sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}
+            sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}_debug
+          key: bwrap-${{ env.BUBBLEWRAP_VERSION }}-${{ matrix.arch }}-musl-static-v2
 
-      - name: Build static bwrap (${{ matrix.arch }})
+      - name: Build static bwrap — release + debug (${{ matrix.arch }})
         if: steps.bwrap-cache.outputs.cache-hit != 'true'
         run: |
           docker run --rm \
@@ -89,49 +93,70 @@ jobs:
               git clone --depth 1 --branch "$BUBBLEWRAP_VERSION" \
                 https://github.com/containers/bubblewrap /tmp/bwrap-src
               cd /tmp/bwrap-src
-              meson setup _build \
-                --buildtype=release \
-                --prefer-static \
-                -Db_pie=false \
-                -Ddefault_library=static \
-                -Dc_link_args=-static \
-                -Dc_args=-Wno-format-overflow \
-                -Dselinux=disabled \
-                -Dman=disabled \
-                -Dtests=false \
-                -Dbash_completion=disabled \
-                -Dzsh_completion=disabled
-              meson compile -C _build
-              install -Dm755 _build/bwrap "/work/sandbox/bwrap/bin/bwrap_linux_${ARCH}"
-              file  "/work/sandbox/bwrap/bin/bwrap_linux_${ARCH}"
-              "/work/sandbox/bwrap/bin/bwrap_linux_${ARCH}" --version
+              # release -> optimized/stripped-ish; debug -> -O0 -g, assertions, unstripped.
+              for pair in "release:bwrap_linux_${ARCH}" "debug:bwrap_linux_${ARCH}_debug"; do
+                bt="${pair%%:*}"; out="${pair##*:}"
+                meson setup "_build_${bt}" \
+                  --buildtype="${bt}" \
+                  --prefer-static \
+                  -Db_pie=false \
+                  -Ddefault_library=static \
+                  -Dc_link_args=-static \
+                  -Dc_args=-Wno-format-overflow \
+                  -Dselinux=disabled \
+                  -Dman=disabled \
+                  -Dtests=false \
+                  -Dbash_completion=disabled \
+                  -Dzsh_completion=disabled
+                meson compile -C "_build_${bt}"
+                install -Dm755 "_build_${bt}/bwrap" "/work/sandbox/bwrap/bin/${out}"
+                file  "/work/sandbox/bwrap/bin/${out}"
+                "/work/sandbox/bwrap/bin/${out}" --version
+              done
             '
 
-      - name: Verify embedded bwrap is present and non-empty
+      - name: Verify both embedded bwraps are present and non-empty
         run: |
-          f="sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}"
-          test -s "$f" || { echo "::error::$f is empty — bwrap build failed"; exit 1; }
-          ls -la "$f"
+          for f in \
+            "sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}" \
+            "sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}_debug"; do
+            test -s "$f" || { echo "::error::$f is empty — bwrap build failed"; exit 1; }
+            ls -la "$f"
+          done
 
-      - name: Build plexus (${{ matrix.arch }})
+      - name: Build plexus — release + debug (${{ matrix.arch }})
         env:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
+          # release: trimmed + stripped, embeds the optimized bwrap.
           go build -trimpath -ldflags='-s -w' \
             -o "dist/plexus-linux-${{ matrix.arch }}" ./internal/bin/plexus
+          # debug: keep Go symbols, disable optimization/inlining, embed the debug bwrap.
+          go build -tags debug -gcflags=all='-N -l' \
+            -o "dist/plexus-linux-${{ matrix.arch }}-debug" ./internal/bin/plexus
           ls -la dist/
 
-      # The runner arch matches matrix.arch, so the freshly built binary runs here.
-      - name: Smoke — binary starts
-        run: ./dist/plexus-linux-${{ matrix.arch }} --help >/dev/null
+      # The runner arch matches matrix.arch, so the freshly built binaries run here.
+      - name: Smoke — binaries start
+        run: |
+          ./dist/plexus-linux-${{ matrix.arch }} --help >/dev/null
+          ./dist/plexus-linux-${{ matrix.arch }}-debug --help >/dev/null
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
         with:
           name: plexus-linux-${{ matrix.arch }}
           path: dist/plexus-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+      - name: Upload debug binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: plexus-linux-${{ matrix.arch }}-debug
+          path: dist/plexus-linux-${{ matrix.arch }}-debug
           if-no-files-found: error
 
       - name: Attach to release (tags only)
@@ -140,4 +165,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}" || true
-          gh release upload "${GITHUB_REF_NAME}" "dist/plexus-linux-${{ matrix.arch }}" --clobber
+          gh release upload "${GITHUB_REF_NAME}" \
+            "dist/plexus-linux-${{ matrix.arch }}" \
+            "dist/plexus-linux-${{ matrix.arch }}-debug" --clobber

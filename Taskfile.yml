@@ -5,7 +5,12 @@ tasks:
     desc: Build the plexus binary
     cmds:
       - go build -o bin/plexus ./internal/bin/plexus
-      - go build ./... 
+      - go build ./...
+
+  build:debug:
+    desc: Build a debuggable plexus (embeds the debug bwrap, keeps Go symbols, no inlining)
+    cmds:
+      - go build -tags debug -gcflags=all='-N -l' -o bin/plexus-debug ./internal/bin/plexus
 
   run:
     desc: Run the plexus binary
