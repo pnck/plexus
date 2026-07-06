@@ -33,3 +33,5 @@ go.work.sum
 
 # Build outputs
 /bin/
+# `go build ./internal/bin/plexus` without -o drops the binary here
+/plexus

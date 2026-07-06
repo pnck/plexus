@@ -26,7 +26,7 @@ var (
 	trunkAddr     string
 	agentID       string
 	sandboxed     bool
-	runSandboxCfg sandboxConfig
+	runSandboxCfg sandbox.Config
 )
 
 var runCmd = &cobra.Command{
@@ -34,17 +34,17 @@ var runCmd = &cobra.Command{
 	Short: "Run the plexus mesh daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if sandboxed {
-			// --sandbox drives the whole sandbox flow (preflight + caps + Phase-0 fence +
-			// bwrap + self-confine) across re-execs. The host phases exec away and never
-			// return here; only the in-sandbox phase (post-confine) falls through to run.
+			// --sandbox drives the whole sandbox chain (launch → fence → jail → confine)
+			// across re-execs. The host-side stages exec away and never return here; only
+			// the confined stage falls through to run.
 			runSandboxCfg.AgentID = agentID
-			if err := enterSandbox(&runSandboxCfg); err != nil {
+			if err := sandbox.Enter(runSandboxCfg); err != nil {
 				return err
 			}
 		}
 
-		// Inside a per-agent netns, serve the transparent egress proxy on the sockets
-		// Setup handed down (no-op when there is no netns fence).
+		// Inside a per-agent netns, serve the transparent egress proxy on the sockets the
+		// fence stage handed down (no-op when there is no netns fence).
 		stopEgress, err := egress.ServeInherited()
 		if err != nil {
 			return fmt.Errorf("egress proxy: %w", err)
@@ -157,7 +157,7 @@ func sandboxEnvState() string {
 	}
 	env := sandbox.Environment{Policy: pol, Limits: sandbox.DefaultConfinement().Rlimits}
 	if tcp := os.Getenv(egress.EnvNetTCP); tcp != "" {
-		np := netpol.NetPolicy{TCP: parseNetAction(tcp), UDP: parseNetAction(os.Getenv(egress.EnvNetUDP))}
+		np := netpol.NetPolicy{TCP: netpol.ParseAction(tcp), UDP: netpol.ParseAction(os.Getenv(egress.EnvNetUDP))}
 		env.Net = &np
 	}
 	return env.Describe()

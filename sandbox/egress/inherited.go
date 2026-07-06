@@ -30,7 +30,7 @@ func ServeInherited() (stop func(), err error) {
 		return func() {}, nil
 	}
 	p := &Proxy{
-		Policy: netpol.NetPolicy{TCP: parseAction(os.Getenv(EnvNetTCP)), UDP: parseAction(os.Getenv(EnvNetUDP))},
+		Policy: netpol.NetPolicy{TCP: netpol.ParseAction(os.Getenv(EnvNetTCP)), UDP: netpol.ParseAction(os.Getenv(EnvNetUDP))},
 		Relay:  os.Getenv(EnvRelay),
 	}
 	tcpLn, err := inheritedListener(EnvTCPFD, "egress-tcp")
@@ -82,15 +82,4 @@ func fdFromEnv(env string) (int, error) {
 		return 0, fmt.Errorf("egress: bad %s=%q", env, os.Getenv(env))
 	}
 	return fd, nil
-}
-
-func parseAction(s string) netpol.NetAction {
-	switch s {
-	case "redirect":
-		return netpol.Redirect
-	case "reject":
-		return netpol.Reject
-	default:
-		return netpol.Drop
-	}
 }

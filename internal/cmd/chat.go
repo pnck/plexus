@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"plexus/internal/chat"
 	"plexus/pkg/brain"
+	"plexus/sandbox"
 	"plexus/sandbox/egress"
 )
 
@@ -25,7 +26,7 @@ var (
 	chatAllowExec   bool
 	chatReasoning   string
 	chatWithSandbox bool
-	chatSandboxCfg  sandboxConfig
+	chatSandboxCfg  sandbox.Config
 )
 
 // chatCmd launches a fully assembled agent (brain + effector + delegation +
@@ -37,19 +38,19 @@ var chatCmd = &cobra.Command{
 	Use:   "chat",
 	Short: "Chat with a fully assembled plexus agent over the mesh",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// --sandbox drives the full sandbox flow (preflight + caps + Phase-0 fence +
-		// bwrap + self-confine) — the SAME entry every command uses; chat is not a
-		// special "lighter" mode. The host phases exec away and never return here; only
-		// the in-sandbox phase (post-confine) falls through to run the session.
+		// --sandbox drives the whole sandbox chain (launch → fence → jail → confine) —
+		// the SAME entry every command uses; chat is not a special "lighter" mode. The
+		// host-side stages exec away and never return here; only the confined stage falls
+		// through to run the session.
 		if chatWithSandbox {
 			chatSandboxCfg.AgentID = "chat"
-			if err := enterSandbox(&chatSandboxCfg); err != nil {
+			if err := sandbox.Enter(chatSandboxCfg); err != nil {
 				return err
 			}
 		}
 
-		// Serve the transparent egress proxy on the sockets Phase-0 handed down (no-op
-		// when there is no netns fence, e.g. un-sandboxed chat).
+		// Serve the transparent egress proxy on the sockets the fence stage handed down
+		// (no-op when there is no netns fence, e.g. un-sandboxed chat).
 		stopEgress, err := egress.ServeInherited()
 		if err != nil {
 			return fmt.Errorf("egress proxy: %w", err)

@@ -1,6 +1,6 @@
 //go:build linux
 
-package setup
+package fence
 
 import (
 	"encoding/binary"
@@ -17,181 +17,80 @@ import (
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 
 	"plexus/sandbox/cgroup"
 	"plexus/sandbox/netpol"
 )
 
-// OSExecutor is the real privileged Phase-0 Executor (E4.6.4.2). It drives the
-// kernel directly through netlink — vishvananda/netlink for the netns/veth/route,
-// google/nftables for the egress fence — and writes cgroup-v2 files, with NO ip /
-// nft / tc binaries, keeping plexus a single self-contained executable. It requires
-// CAP_NET_ADMIN and a writable cgroup subtree (Phase 0 runs as the privileged Setup,
-// flow doc §7). Runtime verification belongs in a privileged env.
+// OSBuilder is the real Builder. It runs INSIDE the anonymous, loopback-only network
+// namespace the launch stage created via an unprivileged user namespace, so it is
+// ns-root of the userns that owns this netns and holds CAP_NET_ADMIN *scoped to it*
+// for free — no host capability. It drives the kernel directly through netlink
+// (vishvananda/netlink for lo + the TPROXY route/rule) and google/nftables for the
+// egress fence, with NO ip / nft / tc binaries, keeping plexus a single self-contained
+// executable. A writable cgroup subtree is optional — LimitResources degrades to the
+// rlimit floor when it is absent.
 //
 // The nft builder mirrors the golden netpol.GenerateNFT text rule-for-rule (deny-all
 // policy, loopback/bus accept, ct established, ct-count cap, per-protocol redirect
 // mark / reject / drop, and the `log` prefix) — the two representations must stay in
-// sync by hand until a privileged golden-equivalence test locks them together.
-type OSExecutor struct {
-	ns map[string]netns.NsHandle // named netns handles, by name
+// sync by hand until a golden-equivalence test locks them together.
+type OSBuilder struct{}
+
+// NewOSBuilder returns a ready OSBuilder.
+func NewOSBuilder() *OSBuilder { return &OSBuilder{} }
+
+// UpLoopback brings the current netns's lo up (it starts DOWN).
+func (OSBuilder) UpLoopback() error {
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		return fmt.Errorf("find lo: %w", err)
+	}
+	return netlink.LinkSetUp(lo)
 }
 
-// NewOSExecutor returns a ready OSExecutor.
-func NewOSExecutor() *OSExecutor { return &OSExecutor{ns: map[string]netns.NsHandle{}} }
-
-// CreateNetns creates a persistent named network namespace (bind-mounted at
-// /var/run/netns/<name>) and keeps its handle for the later steps. The current
-// thread is switched into it transiently and restored.
-func (x *OSExecutor) CreateNetns(name string) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	orig, err := netns.Get()
-	if err != nil {
-		return fmt.Errorf("get current netns: %w", err)
-	}
-	defer func() { _ = netns.Set(orig); _ = orig.Close() }()
-
-	h, err := netns.NewNamed(name)
-	if err != nil {
-		return fmt.Errorf("create netns %s: %w", name, err)
-	}
-	x.ns[name] = h
-	return nil
-}
-
-// Cleanup best-effort removes the named netns (dropping the moved veth) and any
-// dangling host-side veth, so a failed Setup leaves nothing for a retry to collide
-// with. Errors are advisory — the objects may already be gone.
-func (x *OSExecutor) Cleanup(name, vethHost string) error {
-	if h, ok := x.ns[name]; ok {
-		_ = h.Close()
-		delete(x.ns, name)
-	}
-	_ = netns.DeleteNamed(name)
-	if vethHost != "" {
-		if link, err := netlink.LinkByName(vethHost); err == nil {
-			_ = netlink.LinkDel(link)
-		}
-	}
-	return nil
-}
-
-func (x *OSExecutor) CreateVethPair(host, peer string) error {
-	la := netlink.NewLinkAttrs()
-	la.Name = host
-	if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: la, PeerName: peer}); err != nil {
-		return fmt.Errorf("create veth %s<->%s: %w", host, peer, err)
-	}
-	return nil
-}
-
-func (x *OSExecutor) MoveToNetns(iface, name string) error {
-	link, err := netlink.LinkByName(iface)
-	if err != nil {
-		return fmt.Errorf("find %s: %w", iface, err)
-	}
-	h, ok := x.ns[name]
-	if !ok {
-		return fmt.Errorf("unknown netns %s", name)
-	}
-	return netlink.LinkSetNsFd(link, int(h))
-}
-
-// handle returns a netlink handle bound to the named netns ("" = the host/current
-// namespace). The caller must Delete() it.
-func (x *OSExecutor) handle(name string) (*netlink.Handle, error) {
-	if name == "" {
-		return netlink.NewHandle()
-	}
-	h, ok := x.ns[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown netns %s", name)
-	}
-	return netlink.NewHandleAt(h)
-}
-
-func (x *OSExecutor) SetAddr(name, iface, cidr string) error {
-	addr, err := netlink.ParseAddr(cidr)
-	if err != nil {
-		return fmt.Errorf("parse addr %s: %w", cidr, err)
-	}
-	h, err := x.handle(name)
-	if err != nil {
-		return err
-	}
-	defer h.Close()
-	link, err := h.LinkByName(iface)
-	if err != nil {
-		return fmt.Errorf("find %s: %w", iface, err)
-	}
-	return h.AddrAdd(link, addr)
-}
-
-func (x *OSExecutor) SetLinkUp(name, iface string) error {
-	h, err := x.handle(name)
-	if err != nil {
-		return err
-	}
-	defer h.Close()
-	link, err := h.LinkByName(iface)
-	if err != nil {
-		return fmt.Errorf("find %s: %w", iface, err)
-	}
-	return h.LinkSetUp(link)
-}
-
-func (x *OSExecutor) AddDefaultRoute(name, gateway string) error {
-	gw := net.ParseIP(gateway)
-	if gw == nil {
-		return fmt.Errorf("bad gateway %q", gateway)
-	}
-	h, err := x.handle(name)
-	if err != nil {
-		return err
-	}
-	defer h.Close()
-	return h.RouteAdd(&netlink.Route{Gw: gw}) // Dst nil => default route
-}
-
-// ApplyFence installs the nft egress fence and, for a redirected protocol, the
-// TPROXY reroute (fwmark rule + local route), both in the netns.
-func (x *OSExecutor) ApplyFence(name string, policy netpol.NetPolicy, params netpol.Params) error {
-	if err := x.applyNFT(name, policy, params); err != nil {
+// ApplyEgressFence installs the nft egress fence and, when a protocol is redirected
+// (auditing on), the TPROXY reroute in the current netns.
+func (b OSBuilder) ApplyEgressFence(policy netpol.NetPolicy, params netpol.Params) error {
+	if err := b.applyNFT(policy, params); err != nil {
 		return fmt.Errorf("nft: %w", err)
 	}
 	if policy.Decide(netpol.TCP) == netpol.Redirect || policy.Decide(netpol.UDP) == netpol.Redirect {
-		if err := x.applyReroute(name, params); err != nil {
+		if err := b.applyReroute(params); err != nil {
 			return fmt.Errorf("tproxy reroute: %w", err)
 		}
 	}
 	return nil
 }
 
-// applyReroute mirrors netpol.GenerateIPRules: `ip rule add fwmark M lookup T` +
-// `ip route add local default dev lo table T`, so TPROXY-marked local output is
-// redelivered to the transparent proxy.
-func (x *OSExecutor) applyReroute(name string, params netpol.Params) error {
-	h, err := x.handle(name)
+// applyReroute mirrors netpol.GenerateIPRules for a loopback-only netns: a base
+// `default dev lo` route (so a locally-generated packet to an arbitrary address
+// survives the FIRST output route lookup and reaches the nft output hook, where its
+// TPROXY mark is set — the netns has no other link), then `ip rule add fwmark M lookup
+// T` + `ip route add local default dev lo table T`, so the marked packet is redelivered
+// locally to the transparent proxy.
+func (OSBuilder) applyReroute(params netpol.Params) error {
+	lo, err := netlink.LinkByName("lo")
 	if err != nil {
-		return err
+		return fmt.Errorf("find lo: %w", err)
 	}
-	defer h.Close()
+
+	// Base default route via lo (main table): makes the initial output lookup succeed so
+	// marked traffic reaches the output hook. Unmarked traffic the fence does not accept
+	// is dropped by the nft policy in that same hook, so it never egresses.
+	_, defDst, _ := net.ParseCIDR("0.0.0.0/0")
+	if err := netlink.RouteAdd(&netlink.Route{Dst: defDst, LinkIndex: lo.Attrs().Index}); err != nil {
+		return fmt.Errorf("base route: %w", err)
+	}
 
 	rule := netlink.NewRule()
 	rule.Mark = params.Mark
 	rule.Table = params.Table
-	if err := h.RuleAdd(rule); err != nil {
+	if err := netlink.RuleAdd(rule); err != nil {
 		return fmt.Errorf("ip rule: %w", err)
 	}
-	lo, err := h.LinkByName("lo")
-	if err != nil {
-		return fmt.Errorf("find lo: %w", err)
-	}
-	_, defDst, _ := net.ParseCIDR("0.0.0.0/0")
-	return h.RouteAdd(&netlink.Route{
+	return netlink.RouteAdd(&netlink.Route{
 		Type:      unix.RTN_LOCAL,
 		Scope:     unix.RT_SCOPE_HOST, // matches `ip route add local …`
 		Table:     params.Table,
@@ -200,18 +99,10 @@ func (x *OSExecutor) applyReroute(name string, params netpol.Params) error {
 	})
 }
 
-// applyNFT builds the `table inet mesh` / `chain out` fence programmatically,
-// mirroring netpol.GenerateNFT.
-func (x *OSExecutor) applyNFT(name string, policy netpol.NetPolicy, params netpol.Params) error {
-	var opts []nftables.ConnOption
-	if name != "" {
-		h, ok := x.ns[name]
-		if !ok {
-			return fmt.Errorf("unknown netns %s", name)
-		}
-		opts = append(opts, nftables.WithNetNSFd(int(h)))
-	}
-	c, err := nftables.New(opts...)
+// applyNFT builds the `table inet mesh` / `chain out` fence programmatically in the
+// current netns, mirroring netpol.GenerateNFT.
+func (OSBuilder) applyNFT(policy netpol.NetPolicy, params netpol.Params) error {
+	c, err := nftables.New()
 	if err != nil {
 		return err
 	}
@@ -234,8 +125,8 @@ func (x *OSExecutor) applyNFT(name string, policy netpol.NetPolicy, params netpo
 
 	// ip daddr 127.0.0.0/8 accept
 	add(append(ipv4DaddrMasked(net.IPv4(127, 0, 0, 0).To4(), []byte{0xff, 0, 0, 0}), acceptVerdict()...))
-	// ip daddr <CP> tcp dport <port> accept — the bus, and the relay (so the proxy's
-	// own upstream to the CP relay isn't re-marked into a TPROXY loop).
+	// ip daddr <CP> tcp dport <port> accept — the bus, and the relay (so the proxy's own
+	// upstream to the CP relay isn't re-marked into a TPROXY loop).
 	if cp := net.ParseIP(params.CP).To4(); cp != nil {
 		cpTCPAccept := func(port int) {
 			e := ipv4Daddr(cp)
@@ -360,18 +251,16 @@ func be16(v int) []byte {
 	return b
 }
 
-// CreateCgroup makes a cgroup-v2 group and writes its limits; a zero limit is left
-// at the parent default.
-func (x *OSExecutor) CreateCgroup(name string, lim CgroupLimits) error {
-	// Reuse the E4.3 cgroup layer instead of a raw top-level mkdir: it creates the
-	// group UNDER this process's own cgroup, sets memory/pids, joins this process (so
-	// the exec'd agent inherits it), and — crucially — degrades to ErrUnavailable
-	// when no delegated cgroup-v2 subtree is writable (e.g. an unprivileged
-	// container), so Setup falls back to the rlimit floor rather than failing.
-	// (CPUMax is not yet handled by the shared cgroup layer.)
-	if _, err := cgroup.Apply(name, cgroup.Limits{MemoryMax: lim.MemoryMax, PidsMax: lim.PidsMax}); err != nil {
+// LimitResources makes a cgroup-v2 group and writes its limits; a zero limit is left at
+// the parent default. It reuses the shared cgroup layer, which creates the group UNDER
+// this process's own cgroup, sets memory/pids, joins this process (so the exec'd agent
+// inherits it), and degrades to ErrUnavailable when no delegated cgroup-v2 subtree is
+// writable (e.g. an unprivileged container) — in which case the sandbox falls back to
+// the rlimit floor rather than failing. (CPUMax is not yet handled by the shared layer.)
+func (OSBuilder) LimitResources(agentID string, lim Limits) error {
+	if _, err := cgroup.Apply(agentID, cgroup.Limits{MemoryMax: lim.MemoryMax, PidsMax: lim.PidsMax}); err != nil {
 		if errors.Is(err, cgroup.ErrUnavailable) {
-			slog.Warn("setup: cgroup delegation unavailable — relying on the rlimit floor", "agent", name)
+			slog.Warn("fence: cgroup delegation unavailable — relying on the rlimit floor", "agent", agentID)
 			return nil
 		}
 		return err
@@ -379,28 +268,22 @@ func (x *OSExecutor) CreateCgroup(name string, lim CgroupLimits) error {
 	return nil
 }
 
-// EnterAndExec joins the prepared netns + cgroup, opens the IP_TRANSPARENT egress
-// sockets inside the netns (while still privileged) and hands them to the child as
-// inherited fds, then execs the agent — replacing this process, so its parent stays
-// the caller (the persistent CP). The OS thread is locked so the netns setns binds
-// the thread that immediately execs.
-func (x *OSExecutor) EnterAndExec(name, _ string, egressPort int, argv, env []string) error {
-	if len(argv) == 0 {
+// SpawnAgent opens the IP_TRANSPARENT egress sockets in the current netns (while the
+// process still holds the in-userns CAP_NET_ADMIN) and hands them to the agent as
+// inherited fds, then execs it — replacing this process, so its parent stays the
+// launcher (the host-netns supervisor). No setns: the process is already in the netns
+// the userns clone created. The OS thread is locked so the privileged socket setup and
+// the exec stay on one thread.
+func (OSBuilder) SpawnAgent(egressPort int, agent Cmd) error {
+	if len(agent.Argv) == 0 {
 		return fmt.Errorf("empty argv")
 	}
 	runtime.LockOSThread()
 
-	h, ok := x.ns[name]
-	if !ok {
-		return fmt.Errorf("unknown netns %s", name)
-	}
-	if err := unix.Setns(int(h), unix.CLONE_NEWNET); err != nil {
-		return fmt.Errorf("setns %s: %w", name, err)
-	}
-
-	// Open the transparent egress sockets now (privileged, in the netns) and pass
-	// them down: the confined agent has no CAP_NET_ADMIN to open them itself. The fds
-	// are left inheritable (no CLOEXEC) so they survive the exec chain.
+	env := agent.Env
+	// Open the transparent egress sockets now (in the netns) and pass them down: the
+	// confined agent has no CAP_NET_ADMIN to open them itself. The fds are left
+	// inheritable (no CLOEXEC) so they survive the exec chain.
 	if egressPort > 0 {
 		tcpFD, err := openTransparent(unix.SOCK_STREAM, egressPort)
 		if err != nil {
@@ -416,18 +299,18 @@ func (x *OSExecutor) EnterAndExec(name, _ string, egressPort int, argv, env []st
 		)
 	}
 
-	// The cgroup was created and JOINED in CreateCgroup (same process, via
-	// cgroup.Apply), so the exec'd agent already inherits it — nothing to do here.
-	bin, err := exec.LookPath(argv[0])
+	// The cgroup was created and JOINED in LimitResources (same process), so the exec'd
+	// agent already inherits it — nothing to do here.
+	bin, err := exec.LookPath(agent.Argv[0])
 	if err != nil {
-		return fmt.Errorf("lookpath %s: %w", argv[0], err)
+		return fmt.Errorf("lookpath %s: %w", agent.Argv[0], err)
 	}
-	return syscall.Exec(bin, argv, env)
+	return syscall.Exec(bin, agent.Argv, env)
 }
 
-// openTransparent creates a bound IP_TRANSPARENT socket on 127.0.0.1:port and
-// returns its fd (left inheritable — no SOCK_CLOEXEC — for the child to serve). UDP
-// sockets also get IP_RECVORIGDSTADDR so the proxy can recover original destinations.
+// openTransparent creates a bound IP_TRANSPARENT socket on 127.0.0.1:port and returns
+// its fd (left inheritable — no SOCK_CLOEXEC — for the agent to serve). UDP sockets also
+// get IP_RECVORIGDSTADDR so the proxy can recover original destinations.
 func openTransparent(sotype, port int) (int, error) {
 	fd, err := unix.Socket(unix.AF_INET, sotype, 0)
 	if err != nil {

@@ -56,6 +56,15 @@ func parseAction(s string) (NetAction, error) {
 	}
 }
 
+// ParseAction maps a CLI/env egress token to its NetAction, defaulting to Drop (the
+// deny-all zero value) for the empty string or any unknown token. It is the single
+// lenient parser shared by the flag layer, the fence planner, and the egress proxy —
+// deny-closed by construction, so a typo fails safe.
+func ParseAction(s string) NetAction {
+	a, _ := parseAction(s)
+	return a
+}
+
 // UnmarshalYAML lets a NetAction field accept the startup-config token directly.
 func (a *NetAction) UnmarshalYAML(n *yaml.Node) error {
 	var s string

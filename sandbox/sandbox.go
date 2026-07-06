@@ -1,71 +1,99 @@
+// Package sandbox establishes an agent's isolation with NO host privilege: any
+// ordinary user can start it. Entry is a chain of process re-execs, each adding one
+// layer of confinement, selected by the handover env the previous stage set:
+//
+//	launch   (host netns)          fork this command into a fresh USER+NETWORK namespace
+//	                               (CLONE_NEWUSER|CLONE_NEWNET); the launcher stays a
+//	                               thin host-netns supervisor. Zero host capabilities.
+//	fence    (in the new netns)    build the network fence + resource cgroup with the
+//	                               free in-userns CAP_NET_ADMIN, then exec onward.
+//	jail     (bwrap)               build the fs/mount/user/pid/ipc isolation, then exec.
+//	confine  (in the jail)         drop rlimits + load seccomp, then return to run.
+//
+// The only hard prerequisite is unprivileged user namespaces — the same thing bwrap
+// itself needs. No CAP_NET_ADMIN / CAP_SYS_ADMIN / root is ever asked of the host: the
+// network fence's CAP_NET_ADMIN is held for free inside the user namespace that owns
+// the network namespace, and there is no named netns / veth, so CAP_SYS_ADMIN never
+// enters. On platforms without a wired backend, Enter refuses cleanly at launch.
 package sandbox
 
 import (
 	"fmt"
 	"log/slog"
 	"os"
+
+	"plexus/sandbox/bwrap"
 )
 
-// Provider defines the interface for different sandboxing technologies (e.g., bwrap, gvisor).
+// EnvTicket names the one-time handover ticket path. Its presence in the environment is
+// how a process knows it is already INSIDE the jail (the confine stage) rather than
+// building toward it — the entry state machine keys the last stage on it.
+const EnvTicket = "PLEXUS_SANDBOX_TICKET"
+
+// envStage marks the in-namespace fence stage across the launch→fence re-exec. The jail
+// and confine stages are keyed on bwrap.EnvPolicy / EnvTicket respectively, so only the
+// fence stage needs its own marker.
+const (
+	envStage    = "PLEXUS_SANDBOX_STAGE"
+	stageFenced = "fenced"
+)
+
+// Provider is a sandbox backend: it builds the filesystem/namespace jail from the
+// assembled Policy and execs the agent into it. bwrap is the only wired backend
+// (Linux); other backends (e.g. macOS seatbelt) plug in behind this same interface,
+// translating the same backend-neutral Policy. provider() returns the platform's.
 type Provider interface {
 	Name() string
 	Enter(ticketPath string, extraArgs []string) error
 }
 
-// EnvTicket names the one-time handover ticket path. Its presence in the environment
-// is how a process knows it is already INSIDE the sandbox (Phase 2) rather than on
-// the host — the sandbox-entry state machine keys on it.
-const EnvTicket = "PLEXUS_SANDBOX_TICKET"
-
-// EnterIfRequested evaluates the sandbox flag and the current execution state.
-// - If sandboxed == false, it returns immediately.
-// - If on Host: it generates the ticket, calls the provider, and syscall.Execs.
-// - If in Sandbox: it verifies and consumes the ticket, returning nil to allow execution to proceed.
-func EnterIfRequested(sandboxed bool, provider Provider, extraArgs []string) error {
-	if !sandboxed {
-		return nil
+// Enter establishes the sandbox for the current command and returns once the agent is
+// confined and may run. It drives the launch→fence→jail→confine chain across re-execs;
+// the host-side stages exec away and never return here, so a nil return means "you are
+// inside the finished sandbox — proceed". Call it only when --sandbox is requested.
+func Enter(cfg Config) error {
+	switch {
+	case os.Getenv(EnvTicket) != "":
+		return confine()
+	case os.Getenv(bwrap.EnvPolicy) != "":
+		return jail()
+	case os.Getenv(envStage) == stageFenced:
+		return buildFence(cfg)
+	default:
+		return launch(cfg)
 	}
+}
 
-	if provider == nil {
-		return fmt.Errorf("sandbox mode requested but no sandbox provider was configured")
+// jail (stage 3) generates the one-time ticket and execs the filesystem-jail backend
+// (bwrap), which rebuilds the process inside mount/user/pid/ipc namespaces and re-execs
+// the agent carrying the ticket. It returns only on error.
+func jail() error {
+	p, err := provider()
+	if err != nil {
+		return err
 	}
-
-	ticketPath := os.Getenv(EnvTicket)
-	if ticketPath == "" {
-		// --- HOST PHASE ---
-
-		// 1. Generate one-time handover ticket
-		path, err := GenerateTicket()
-		if err != nil {
-			return fmt.Errorf("failed to generate sandbox ticket: %w", err)
-		}
-
-		os.Setenv(EnvTicket, path)
-
-		slog.Info("Hollowing out process and entering sandbox...", "provider", provider.Name(), "ticket", path)
-
-		// Delegate to specific sandbox implementation
-		if err := provider.Enter(path, extraArgs); err != nil {
-			return fmt.Errorf("sandbox transition failed via %s: %w", provider.Name(), err)
-		}
-
-		return nil
+	ticketPath, err := GenerateTicket()
+	if err != nil {
+		return fmt.Errorf("generate sandbox ticket: %w", err)
 	}
-
-	// --- SANDBOX PHASE ---
-
-	if err := VerifyAndConsumeTicket(ticketPath); err != nil {
-		return fmt.Errorf("FATAL: %w", err)
+	if err := os.Setenv(EnvTicket, ticketPath); err != nil {
+		return fmt.Errorf("set sandbox ticket: %w", err)
 	}
+	slog.Info("entering filesystem jail", "backend", p.Name())
+	return p.Enter(ticketPath, nil)
+}
 
-	// Phase 2 self-confinement (flow doc §4): now that bwrap has built the
-	// namespaces, the agent shrinks its own surface — lower rlimits, then load the
-	// seccomp filter — before it runs any untrusted work. Both are unprivileged and
-	// irreversible; this is the last thing before the cognitive loop.
+// confine (stage 4) is the innermost stage: it verifies+consumes the ticket (proving a
+// deterministic entry, not a stray re-exec), then applies the unprivileged, irreversible
+// self-confinement — lower rlimits, then the seccomp filter — before returning so the
+// caller runs the agent. Both are the last things before any untrusted work.
+func confine() error {
+	if err := VerifyAndConsumeTicket(os.Getenv(EnvTicket)); err != nil {
+		return fmt.Errorf("sandbox ticket: %w", err)
+	}
 	if err := confineSelf(DefaultConfinement()); err != nil {
-		return fmt.Errorf("FATAL: phase-2 confinement: %w", err)
+		return fmt.Errorf("sandbox confinement: %w", err)
 	}
-
-	slog.Info("[Sandbox] Verified deterministic entry into isolated environment!")
+	slog.Info("sandbox active — agent confined")
 	return nil
 }
