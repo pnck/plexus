@@ -168,3 +168,73 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" \
             "dist/plexus-linux-${{ matrix.arch }}" \
             "dist/plexus-linux-${{ matrix.arch }}-debug" --clobber
+
+  # Runtime smoke of the zero-privilege sandbox on a REAL unprivileged-userns host.
+  # GitHub's ubuntu runners are full VMs that permit user namespaces, so this exercises
+  # the whole launch -> fence -> jail -> confine chain with the CI-built binary (which
+  # embeds bwrap) and asserts the agent reaches the confined stage. It is the one runtime
+  # check the dev/CI container itself cannot perform — a session seccomp filter there
+  # blocks clone(CLONE_NEWUSER), so the sandbox can only be exercised on a full-VM runner.
+  smoke-sandbox:
+    name: smoke sandbox (${{ matrix.arch }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download the release binary (embeds bwrap)
+        uses: actions/download-artifact@v4
+        with:
+          name: plexus-linux-${{ matrix.arch }}
+          path: dl
+
+      - name: Enable + verify unprivileged user namespaces
+        run: |
+          # Ubuntu 23.10+/24.04 gate unprivileged userns behind an AppArmor restriction;
+          # relax it for this VM (runners have passwordless sudo). Keys are guarded — they
+          # exist only on some kernels.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          echo "user.max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces)"
+          unshare -Urn true \
+            && echo "unprivileged user+net namespace: OK" \
+            || { echo "::error::runner cannot create an unprivileged userns — smoke is inconclusive"; exit 1; }
+
+      - name: Smoke — full sandbox chain reaches the confined stage
+        run: |
+          bin=$(find dl -name "plexus-linux-${{ matrix.arch }}" -type f | head -1)
+          test -n "$bin" || { echo "::error::built binary not found in the downloaded artifact"; exit 1; }
+          chmod +x "$bin"
+          # `run --sandbox` walks launch -> fence -> jail (bwrap) -> confine, logs
+          # "sandbox active — agent confined", then blocks trying to reach a (non-existent)
+          # bus on the netns loopback. The timeout reaps that tail; success is decided by
+          # the marker, not the exit code.
+          #
+          # --net-tcp/udp redirect makes the fence exercise the FULL path — not just the
+          # nft load + IP_TRANSPARENT sockets, but the TPROXY reroute (base `default dev
+          # lo` + `ip rule fwmark` + `local default dev lo` table) — which is the least
+          # certain piece in a userns-owned netns. A failure there stops before the marker
+          # and is printed below.
+          set +e
+          timeout 25 "$bin" run --sandbox --net-tcp redirect --net-udp redirect --id ci-smoke >smoke.log 2>&1
+          code=$?
+          set -e
+          echo "----- plexus run --sandbox (exit=$code) -----"
+          cat smoke.log
+          echo "---------------------------------------------"
+          if grep -q "sandbox active" smoke.log; then
+            echo "launch -> fence -> jail -> confine all succeeded on a userns-owned netns"
+          else
+            echo "::error::sandbox chain did not reach the confined stage — the log above shows the failing stage (e.g. a fence nft/TPROXY error, or a bwrap jail failure)"
+            exit 1
+          fi
