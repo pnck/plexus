@@ -67,17 +67,22 @@ func Report(w io.Writer, results []Result) {
 // checkNetnsLoopbackOnly asserts the agent's netns has ONLY loopback — no veth, no other
 // device. This is the zero-privilege design: the netns is loopback-only and the control
 // plane is reached over inherited fds, never an IP route.
+//
+// It enumerates via netlink (net.Interfaces), NOT /sys/class/net: DefaultPolicy is still
+// the E0 `--ro-bind / /`, so the host's /sys is bind-mounted into the sandbox and
+// /sys/class/net would report the HOST's interfaces regardless of our netns. A netlink
+// query is netns-scoped, so it reflects our ACTUAL current namespace.
 func checkNetnsLoopbackOnly() Result {
-	entries, err := os.ReadDir("/sys/class/net")
+	ifaces, err := net.Interfaces()
 	if err != nil {
-		return fail("netns-loopback-only", "read /sys/class/net: "+err.Error())
+		return fail("netns-loopback-only", "list interfaces: "+err.Error())
 	}
 	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
+	for _, i := range ifaces {
+		names = append(names, i.Name)
 	}
 	if len(names) == 1 && names[0] == "lo" {
-		return pass("netns-loopback-only", "only lo present")
+		return pass("netns-loopback-only", "only lo present (netlink)")
 	}
 	return fail("netns-loopback-only", "expected only lo, got ["+strings.Join(names, ",")+"]")
 }
