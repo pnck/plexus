@@ -238,3 +238,63 @@ jobs:
             echo "::error::sandbox chain did not reach the confined stage — the log above shows the failing stage (e.g. a fence nft/TPROXY error, or a bwrap jail failure)"
             exit 1
           fi
+
+  # In-sandbox ENFORCEMENT self-test (dev/CI only, -tags sandboxtest). Where smoke-sandbox
+  # proves the sandbox STARTS, this proves it CONFINES: it builds a sandboxtest-tagged
+  # plexus (embedding bwrap from the build job's cache) and runs `sandbox-selftest`, which
+  # enters launch->fence->jail->confine and asserts each isolation property from inside
+  # (netns loopback-only, external egress fenced, seccomp active, rlimits lowered, /tmp
+  # tmpfs, /proc procfs, cgroup when delegated). The build tag keeps all of this out of
+  # production and local default builds.
+  sandbox-enforce:
+    name: sandbox enforcement (${{ matrix.arch }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Restore static bwrap (populated by the build job)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}
+            sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}_debug
+          key: bwrap-${{ env.BUBBLEWRAP_VERSION }}-${{ matrix.arch }}-musl-static-v2
+
+      - name: Verify embedded bwrap present
+        run: |
+          test -s "sandbox/bwrap/bin/bwrap_linux_${{ matrix.arch }}" \
+            || { echo "::error::bwrap cache miss — the build job should have populated it"; exit 1; }
+
+      - name: Build plexus with the sandboxtest tag (embeds bwrap)
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: go build -tags sandboxtest -o plexus ./internal/bin/plexus
+
+      - name: Enable + verify unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          unshare -Urn true \
+            && echo "unprivileged user+net namespace: OK" \
+            || { echo "::error::runner cannot create an unprivileged userns — enforcement test inconclusive"; exit 1; }
+
+      - name: Run in-sandbox enforcement self-test
+        run: PLEXUS_BIN="$PWD/plexus" go test -tags sandboxtest -run TestSandboxEnforcement -v ./internal/sandboxtest
