@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,8 +35,9 @@ func GenerateTicket() (string, error) {
 }
 
 // VerifyAndConsumeTicket reads the ticket, checks its content matches the nonce in
-// its filename, then deletes it. See the package note: this defends against a stale
-// env var, not a hostile parent.
+// its filename, then best-effort deletes it. See the package note: the content check
+// is the guard (against a stale env var, not a hostile parent); the delete is only
+// hygiene.
 func VerifyAndConsumeTicket(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -46,8 +48,14 @@ func VerifyAndConsumeTicket(path string) error {
 	if expected == "" || name == expected || string(data) != expected {
 		return fmt.Errorf("sandbox ticket content mismatch (spoof attempt or stale env?)")
 	}
+	// Deletion is best-effort, NOT a failure condition. The jail stage delivers the
+	// ticket by bind-mounting it into the sandbox (bwrap --bind), so from inside the
+	// sandbox the ticket is a mountpoint and cannot be unlinked (EBUSY) — expected, not
+	// an error. The nonce check above is what actually guards entry; the host /tmp copy
+	// is a tiny file the OS reaper clears. (On a delivery that leaves it a plain file,
+	// the remove still succeeds and gives one-shot semantics.)
 	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("failed to consume/delete sandbox ticket: %w", err)
+		slog.Debug("sandbox ticket not unlinked from inside the sandbox (bind-mounted)", "path", path, "err", err)
 	}
 	return nil
 }
