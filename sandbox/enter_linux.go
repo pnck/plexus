@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -58,6 +59,11 @@ func launch(_ Config) error {
 	if err := cmd.Wait(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
+			// Propagate the child's status faithfully: its exit code, or 128+signo when it
+			// was killed by a signal (ExitCode() is -1 there, which a shell renders as 255).
+			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+				os.Exit(128 + int(ws.Signal()))
+			}
 			os.Exit(ee.ExitCode())
 		}
 		return fmt.Errorf("sandbox supervisor: %w", err)
@@ -120,16 +126,14 @@ func planFor(cfg Config) (fence.Plan, error) {
 		if err != nil {
 			return fence.Plan{}, err
 		}
-		f, err := os.CreateTemp("", "plexus-resolv-*.conf")
-		if err != nil {
-			return fence.Plan{}, fmt.Errorf("sandbox: create resolv.conf: %w", err)
-		}
-		if _, err := f.WriteString(rc); err != nil {
-			_ = f.Close()
+		// A deterministic per-agent path (not os.CreateTemp): the file is bound read-only
+		// into the jail and cannot be unlinked before the exec chain, so a fresh temp file
+		// every launch would accumulate. Writing the same path per agent overwrites in place.
+		path := filepath.Join(os.TempDir(), "plexus-resolv-"+cfg.AgentID+".conf")
+		if err := os.WriteFile(path, []byte(rc), 0o644); err != nil {
 			return fence.Plan{}, fmt.Errorf("sandbox: write resolv.conf: %w", err)
 		}
-		_ = f.Close()
-		provision.ResolvConf = bwrap.Bind{Src: f.Name()}
+		provision.ResolvConf = bwrap.Bind{Src: path}
 	}
 	policyJSON, err := json.Marshal(bwrap.Policy{
 		System:    system,
@@ -152,7 +156,10 @@ func planFor(cfg Config) (fence.Plan, error) {
 	// The agent's env is this stage's env MINUS the fence-stage marker (so the agent is
 	// not mistaken for another fence stage) PLUS the egress policy + the bwrap Policy that
 	// drives the jail stage.
-	env := append(strippedEnv(envStage),
+	// Strip EVERY handover var from the ambient env before re-setting the ones we mean,
+	// so a stale/ambient copy can't shadow (os.Getenv returns the first match).
+	env := append(strippedEnv(envStage, EnvTicket, bwrap.EnvPolicy,
+		egress.EnvNetTCP, egress.EnvNetUDP, egress.EnvRelay, egress.EnvTCPFD, egress.EnvUDPFD),
 		egress.EnvNetTCP+"="+cfg.NetTCP,
 		egress.EnvNetUDP+"="+cfg.NetUDP,
 		bwrap.EnvPolicy+"="+string(policyJSON),
@@ -173,12 +180,15 @@ func planFor(cfg Config) (fence.Plan, error) {
 	}, nil
 }
 
-// strippedEnv returns os.Environ() with the named variable removed.
-func strippedEnv(key string) []string {
-	prefix := key + "="
+// strippedEnv returns os.Environ() with the named variables removed.
+func strippedEnv(keys ...string) []string {
+	drop := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		drop[k] = true
+	}
 	out := make([]string, 0, len(os.Environ()))
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, prefix) {
+		if k, _, ok := strings.Cut(kv, "="); ok && drop[k] {
 			continue
 		}
 		out = append(out, kv)
