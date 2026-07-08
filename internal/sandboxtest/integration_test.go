@@ -39,7 +39,7 @@ func TestSandboxEnforcement(t *testing.T) {
 	}
 	// The core enforcement properties must be present and not skipped (a SKIP here would
 	// mean the check silently didn't run).
-	for _, name := range []string{"netns-loopback-only", "egress-fenced", "seccomp-active", "rlimit-lowered", "tmpfs-tmp", "proc-mounted"} {
+	for _, name := range []string{"netns-fenced", "no-caps", "egress-fenced", "seccomp-active", "rlimit-lowered", "tmpfs-tmp", "proc-mounted"} {
 		if !strings.Contains(s, "[PASS] "+name) {
 			t.Errorf("expected [PASS] %s in the self-test output", name)
 		}

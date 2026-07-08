@@ -33,7 +33,8 @@ func skip(name, detail string) Result { return Result{Name: name, Skip: true, De
 func RunAll() (ok bool, results []Result) {
 	ok = true
 	for _, c := range []func() Result{
-		checkNetnsLoopbackOnly,
+		checkNetnsFenced,
+		checkNoCaps,
 		checkExternalEgressBlocked,
 		checkSeccompActive,
 		checkRlimitsLowered,
@@ -65,27 +66,46 @@ func Report(w io.Writer, results []Result) {
 	}
 }
 
-// checkNetnsLoopbackOnly asserts the agent's netns has ONLY loopback — no veth, no other
-// device. This is the zero-privilege design: the netns is loopback-only and the control
-// plane is reached over inherited fds, never an IP route.
-//
-// It enumerates via netlink (net.Interfaces), NOT /sys/class/net: DefaultPolicy is still
-// the E0 `--ro-bind / /`, so the host's /sys is bind-mounted into the sandbox and
-// /sys/class/net would report the HOST's interfaces regardless of our netns. A netlink
-// query is netns-scoped, so it reflects our ACTUAL current namespace.
-func checkNetnsLoopbackOnly() Result {
+// checkNetnsFenced asserts the agent is in its own per-agent netns with exactly the fence
+// devices: loopback + the single agent veth to the CP. The host netns would show many
+// devices (eth0, docker0, ...); a fence that failed to build would show none. It
+// enumerates via netlink (net.Interfaces), NOT /sys/class/net — the host's /sys is
+// bind-mounted in (DefaultPolicy is still `--ro-bind / /`), so /sys/class/net would
+// report the HOST interfaces; a netlink query is netns-scoped.
+func checkNetnsFenced() Result {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return fail("netns-loopback-only", "list interfaces: "+err.Error())
+		return fail("netns-fenced", "list interfaces: "+err.Error())
 	}
-	var names []string
+	var nonLo []string
 	for _, i := range ifaces {
-		names = append(names, i.Name)
+		if i.Name != "lo" {
+			nonLo = append(nonLo, i.Name)
+		}
 	}
-	if len(names) == 1 && names[0] == "lo" {
-		return pass("netns-loopback-only", "only lo present (netlink)")
+	switch len(nonLo) {
+	case 1:
+		return pass("netns-fenced", "isolated netns (lo + veth "+nonLo[0]+")")
+	case 0:
+		return fail("netns-fenced", "no veth in the netns — the network fence was not built")
+	default:
+		return fail("netns-fenced", "not a fenced netns — sees host interfaces ["+strings.Join(nonLo, ",")+"]")
 	}
-	return fail("netns-loopback-only", "expected only lo, got ["+strings.Join(names, ",")+"]")
+}
+
+// checkNoCaps asserts the agent holds NO capabilities (effective set empty) — the
+// tamper-proof guarantee: the launcher's CAP_NET_ADMIN is dropped (bwrap --cap-drop ALL)
+// before the agent runs, so no subprocess can reconfigure the fence or escape the netns.
+func checkNoCaps() Result {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return fail("no-caps", "read /proc/self/status: "+err.Error())
+	}
+	eff := statusField(data, "CapEff:")
+	if strings.Trim(eff, "0") == "" && eff != "" {
+		return pass("no-caps", "CapEff="+eff+" (agent holds no capabilities)")
+	}
+	return fail("no-caps", "CapEff="+eff+" (want all-zero — the agent must be cap-dropped)")
 }
 
 // checkExternalEgressBlocked asserts a direct connection to an external host does NOT

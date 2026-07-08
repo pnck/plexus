@@ -210,32 +210,30 @@ jobs:
             && echo "unprivileged user+net namespace: OK" \
             || { echo "::error::runner cannot create an unprivileged userns — smoke is inconclusive"; exit 1; }
 
-      - name: Smoke — full sandbox chain reaches the confined stage
+      - name: Smoke — degraded (no cap) + full fence (CAP_NET_ADMIN)
         run: |
           bin=$(find dl -name "plexus-linux-${{ matrix.arch }}" -type f | head -1)
           test -n "$bin" || { echo "::error::built binary not found in the downloaded artifact"; exit 1; }
           chmod +x "$bin"
-          # `run --sandbox` walks launch -> fence -> jail (bwrap) -> confine, logs
-          # "sandbox active — agent confined", then blocks trying to reach a (non-existent)
-          # bus on the netns loopback. The timeout reaps that tail; success is decided by
-          # the marker, not the exit code.
-          #
-          # --net-tcp/udp redirect makes the fence exercise the FULL path — not just the
-          # nft load + IP_TRANSPARENT sockets, but the TPROXY reroute (base `default dev
-          # lo` + `ip rule fwmark` + `local default dev lo` table) — which is the least
-          # certain piece in a userns-owned netns. A failure there stops before the marker
-          # and is printed below.
-          set +e
-          timeout 25 "$bin" run --sandbox --net-tcp redirect --net-udp redirect --id ci-smoke >smoke.log 2>&1
-          code=$?
-          set -e
-          echo "----- plexus run --sandbox (exit=$code) -----"
-          cat smoke.log
-          echo "---------------------------------------------"
+
+          # (1) Degraded path — NO CAP_NET_ADMIN: the network fence is skipped, the agent
+          # runs on the host network (fs/seccomp still isolate), and it WARNS. It must still
+          # reach the confined stage.
+          set +e; timeout 25 "$bin" run --sandbox --id ci-degraded >degraded.log 2>&1; set -e
+          echo "----- degraded (no CAP_NET_ADMIN) -----"; cat degraded.log; echo "----------"
+          grep -q "network fence disabled" degraded.log || { echo "::error::degraded run must warn 'network fence disabled'"; exit 1; }
+          grep -q "sandbox active" degraded.log        || { echo "::error::degraded run must still reach the confined stage"; exit 1; }
+
+          # (2) Full fence — grant CAP_NET_ADMIN (setcap): launch -> fence (veth + nft +
+          # TPROXY) -> jail -> confine runs the whole chain; redirect exercises the TPROXY
+          # reroute. Success is the marker, not the exit code (it then blocks on a missing bus).
+          sudo setcap cap_net_admin+ep "$bin"
+          set +e; timeout 25 "$bin" run --sandbox --net-tcp redirect --net-udp redirect --id ci-smoke >smoke.log 2>&1; set -e
+          echo "----- full fence (CAP_NET_ADMIN) -----"; cat smoke.log; echo "----------"
           if grep -q "sandbox active" smoke.log; then
-            echo "launch -> fence -> jail -> confine all succeeded on a userns-owned netns"
+            echo "launch -> fence(veth/nft/TPROXY) -> jail -> confine all succeeded"
           else
-            echo "::error::sandbox chain did not reach the confined stage — the log above shows the failing stage (e.g. a fence nft/TPROXY error, or a bwrap jail failure)"
+            echo "::error::full-fence chain did not reach confine — see log (fence veth/nft/TPROXY or bwrap error)"
             exit 1
           fi
 
@@ -298,6 +296,9 @@ jobs:
 
       - name: Run in-sandbox enforcement self-test
         run: |
+          # The network fence needs CAP_NET_ADMIN — grant it to the binary (the launcher
+          # holds it and drops it before the agent runs, which the no-caps check asserts).
+          sudo setcap cap_net_admin+ep plexus
           # Plant a "secret" under a ro-bound host path and mask it, so the fs-masked
           # check proves masking actually HIDES it inside the sandbox (fs-isolation).
           probe="$HOME/plexus-mask-probe"
