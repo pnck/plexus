@@ -21,7 +21,13 @@ func TestSandboxEnforcement(t *testing.T) {
 		t.Skip("PLEXUS_BIN not set — build plexus with `-tags sandboxtest` and point PLEXUS_BIN at it")
 	}
 
-	out, err := exec.Command(bin, "sandbox-selftest").CombinedOutput()
+	args := []string{"sandbox-selftest"}
+	if m := os.Getenv(EnvSelfTestMask); m != "" {
+		args = append(args, "--mask", m) // exercise fs masking: this host path must be hidden inside
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Env = os.Environ() // propagate EnvSelfTestMask into the sandbox so the fs-masked check can read it
+	out, err := cmd.CombinedOutput()
 	t.Logf("sandbox-selftest output:\n%s", out)
 	if err != nil {
 		t.Fatalf("sandbox-selftest exited non-zero (%v) — an isolation check failed or the chain broke; see output above", err)
@@ -37,5 +43,9 @@ func TestSandboxEnforcement(t *testing.T) {
 		if !strings.Contains(s, "[PASS] "+name) {
 			t.Errorf("expected [PASS] %s in the self-test output", name)
 		}
+	}
+	// When a mask probe is provided, masking MUST hide it (fs-isolation guarantee).
+	if os.Getenv(EnvSelfTestMask) != "" && !strings.Contains(s, "[PASS] fs-masked") {
+		t.Errorf("expected [PASS] fs-masked when %s is set — masking must hide the host path", EnvSelfTestMask)
 	}
 }

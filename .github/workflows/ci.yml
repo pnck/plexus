@@ -297,4 +297,10 @@ jobs:
             || { echo "::error::runner cannot create an unprivileged userns — enforcement test inconclusive"; exit 1; }
 
       - name: Run in-sandbox enforcement self-test
-        run: PLEXUS_BIN="$PWD/plexus" go test -tags sandboxtest -run TestSandboxEnforcement -v ./internal/sandboxtest
+        run: |
+          # Plant a "secret" under a ro-bound host path and mask it, so the fs-masked
+          # check proves masking actually HIDES it inside the sandbox (fs-isolation).
+          probe="$HOME/plexus-mask-probe"
+          mkdir -p "$probe" && echo "top-secret" > "$probe/secret"
+          PLEXUS_BIN="$PWD/plexus" PLEXUS_SELFTEST_MASK="$probe" \
+            go test -tags sandboxtest -run TestSandboxEnforcement -v ./internal/sandboxtest

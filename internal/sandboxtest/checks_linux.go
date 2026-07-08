@@ -39,6 +39,7 @@ func RunAll() (ok bool, results []Result) {
 		checkRlimitsLowered,
 		checkTmpfs,
 		checkProcMounted,
+		checkFsMasked,
 		checkCgroupApplied,
 	} {
 		r := c()
@@ -159,6 +160,31 @@ func checkProcMounted() Result {
 		return pass("proc-mounted", "/proc is procfs")
 	}
 	return fail("proc-mounted", fmt.Sprintf("/proc fs type=0x%x (want procfs 0x%x)", uint64(s.Type), uint64(unix.PROC_SUPER_MAGIC)))
+}
+
+// checkFsMasked asserts a host path handed via --mask is HIDDEN inside the sandbox: an
+// empty tmpfs overlays it, so the host contents planted there (a "secret" file) are
+// gone. The path comes from EnvSelfTestMask, which the CI job sets alongside
+// `sandbox-selftest --mask <path>`; without it, masking isn't exercised this run => SKIP.
+// This is the runtime proof that the bwrap Mask mechanism (Policy.Mask -> --tmpfs)
+// actually hides sensitive host paths (the fs-isolation guarantee).
+func checkFsMasked() Result {
+	masked := os.Getenv(EnvSelfTestMask)
+	if masked == "" {
+		return skip("fs-masked", "no "+EnvSelfTestMask+" set — masking not exercised this run")
+	}
+	entries, err := os.ReadDir(masked)
+	if err != nil {
+		return fail("fs-masked", "read "+masked+": "+err.Error())
+	}
+	if len(entries) == 0 {
+		return pass("fs-masked", masked+" is an empty tmpfs (planted host secret hidden)")
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return fail("fs-masked", masked+" is NOT masked — host contents visible ["+strings.Join(names, ",")+"]")
 }
 
 // checkCgroupApplied asserts the agent is in its own delegated cgroup. When no cgroup

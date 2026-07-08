@@ -15,3 +15,8 @@ package sandboxtest
 // delegation is available) is named after it, so the cgroup check looks for it in
 // /proc/self/cgroup. Shared by the self-test command and the checks so they never drift.
 const AgentID = "selftest"
+
+// EnvSelfTestMask names an absolute host path the CI job plants a file under and hands
+// to `sandbox-selftest --mask <path>`; the fs-masked check reads it and asserts the path
+// is an empty tmpfs inside the sandbox (host contents hidden). Unset => the check SKIPs.
+const EnvSelfTestMask = "PLEXUS_SELFTEST_MASK"
