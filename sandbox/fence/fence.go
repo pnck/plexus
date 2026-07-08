@@ -34,6 +34,13 @@ type Limits struct {
 type Plan struct {
 	AgentID string // names the cgroup; also the audit/attribution key
 
+	// Agent-side veth (the launcher already created the pair and moved this peer into the
+	// netns using CAP_NET_ADMIN). The fence gives it AgentCIDR and a single default route
+	// to Gateway (the host veth = the control plane), so egress reaches only the CP.
+	VethPeer  string
+	AgentCIDR string
+	Gateway   string
+
 	// Egress fence. Net is the immutable startup NetPolicy; NFT carries the CP/bus/
 	// egress-port/mark/table/maxconns the generators need. Both the nft ruleset and the
 	// TPROXY ip-rules are produced from these and applied to the netns.
@@ -66,6 +73,11 @@ type Builder interface {
 	// 127.0.0.0/8, the TPROXY reroute delivers `dev lo`, and the egress proxy binds
 	// 127.0.0.1, all of which need it up.
 	UpLoopback() error
+	// SetupVeth configures the agent-side veth peer the launcher moved into this netns:
+	// its address (cidr) + up + the single default route to gateway (the host veth = the
+	// control plane). It gives locally-generated egress a route so it reaches the output
+	// hook (where TPROXY marks it) and the CP is reachable for the bus/relay carve-out.
+	SetupVeth(peerIface, cidr, gateway string) error
 	// ApplyEgressFence installs the egress fence from the immutable NetPolicy + Params:
 	// the nft ruleset (deny-all, bus-direct, redirect→TPROXY mark, ct count) and, when a
 	// protocol is redirected (auditing on), the TPROXY reroute — the fwmark rule, the
@@ -105,6 +117,7 @@ func Build(p Plan, b Builder) error {
 		do   func() error
 	}{
 		{"up loopback", b.UpLoopback},
+		{"configure agent veth", func() error { return b.SetupVeth(p.VethPeer, p.AgentCIDR, p.Gateway) }},
 		{"apply egress fence", func() error { return b.ApplyEgressFence(p.Net, p.NFT) }},
 		{"limit resources", func() error { return b.LimitResources(p.AgentID, p.Limits) }},
 	}

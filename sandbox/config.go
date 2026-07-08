@@ -10,17 +10,21 @@ package sandbox
 type Config struct {
 	AgentID string
 
-	// Egress fence / network auditing. Defaults form a deny-all egress policy; a cluster
-	// launcher (E5/CP) overrides them per agent. There is no veth/subnet: the netns is
-	// loopback-only and the control plane is reached over inherited fds, so the only
-	// network address that matters is the CP (default loopback, for the in-netns bus /
-	// the audit proxy's own upstream carve-out).
-	CP                  string
-	BusPort, EgressPort int
-	Relay               string
-	Mark                uint32
-	Table, MaxConns     int
-	NetTCP, NetUDP      string
+	// RequireNetFence turns the network fence from best-effort into mandatory: when set
+	// and CAP_NET_ADMIN is absent, Enter errors instead of degrading to host networking.
+	RequireNetFence bool
+
+	// Network fence (needs CAP_NET_ADMIN). The veth's peer end is moved into the agent
+	// netns with AgentCIDR; the host end keeps HostCIDR and is the agent's only gateway,
+	// so the single default route (to Gateway) reaches nothing but the control plane.
+	VethHost, VethPeer           string
+	HostCIDR, AgentCIDR, Gateway string
+	CP                           string // the CP IPv4 the fence accepts directly (bus + relay carve-out)
+	BusPort, EgressPort          int
+	Relay                        string
+	Mark                         uint32
+	Table, MaxConns              int
+	NetTCP, NetUDP               string
 
 	// Resource cgroup (0 = create the group but leave that limit unset).
 	MemMax, PidsMax int64

@@ -28,6 +28,9 @@ func (r *recorder) log(s string) error {
 }
 
 func (r *recorder) UpLoopback() error { return r.log("UpLoopback") }
+func (r *recorder) SetupVeth(peer, cidr, gw string) error {
+	return r.log("SetupVeth " + peer + " " + cidr + " " + gw)
+}
 func (r *recorder) ApplyEgressFence(pol netpol.NetPolicy, pr netpol.Params) error {
 	r.fencePolicy, r.fenceParams = pol, pr
 	return r.log("ApplyEgressFence")
@@ -41,11 +44,14 @@ func (r *recorder) SpawnAgent(_ int, agent Cmd) error {
 
 func testPlan() Plan {
 	return Plan{
-		AgentID: "agent-1",
-		Net:     netpol.NetPolicy{TCP: netpol.Redirect, UDP: netpol.Drop},
-		NFT:     netpol.Params{CP: "127.0.0.1", BusPort: 4222, EgressPort: 1080, Mark: 0x1, Table: 100, MaxConns: 64},
-		Limits:  Limits{MemoryMax: 512 << 20, PidsMax: 128},
-		Agent:   Cmd{Argv: []string{"plexus", "run", "--id", "agent-1", "--sandbox"}},
+		AgentID:   "agent-1",
+		VethPeer:  "plxa0",
+		AgentCIDR: "10.242.42.2/30",
+		Gateway:   "10.242.42.1",
+		Net:       netpol.NetPolicy{TCP: netpol.Redirect, UDP: netpol.Drop},
+		NFT:       netpol.Params{CP: "10.242.42.1", BusPort: 4222, EgressPort: 1080, Mark: 0x1, Table: 100, MaxConns: 64},
+		Limits:    Limits{MemoryMax: 512 << 20, PidsMax: 128},
+		Agent:     Cmd{Argv: []string{"plexus", "run", "--id", "agent-1", "--sandbox"}},
 	}
 }
 
@@ -58,6 +64,7 @@ func TestBuildSequence(t *testing.T) {
 	}
 	want := []string{
 		"UpLoopback",
+		"SetupVeth plxa0 10.242.42.2/30 10.242.42.1",
 		"ApplyEgressFence",
 		"LimitResources agent-1",
 		"SpawnAgent plexus,run,--id,agent-1,--sandbox",
@@ -76,7 +83,7 @@ func TestBuildSequence(t *testing.T) {
 	}
 	for _, sub := range []string{
 		"policy drop",
-		"ip daddr 127.0.0.1 tcp dport 4222 accept",
+		"ip daddr 10.242.42.1 tcp dport 4222 accept",
 		"meta l4proto tcp",
 		"meta mark set 0x1",
 	} {

@@ -14,7 +14,7 @@ import (
 
 func provider() (Provider, error) { return nil, unimplemented() }
 
-func launch(Config) error { return unimplemented() }
+func launchOrDegrade(Config) error { return unimplemented() }
 
 func buildFence(Config) error { return unimplemented() }
 

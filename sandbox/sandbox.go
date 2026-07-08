@@ -36,6 +36,9 @@ const EnvTicket = "PLEXUS_SANDBOX_TICKET"
 const (
 	envStage    = "PLEXUS_SANDBOX_STAGE"
 	stageFenced = "fenced"
+	// envVethReadyFD names the inherited pipe fd the fence stage blocks on until the
+	// launcher has built the veth into the netns (it closes the write end to signal).
+	envVethReadyFD = "PLEXUS_VETH_READY_FD"
 )
 
 // Provider is a sandbox backend: it builds the filesystem/namespace jail from the
@@ -60,7 +63,7 @@ func Enter(cfg Config) error {
 	case os.Getenv(envStage) == stageFenced:
 		return buildFence(cfg)
 	default:
-		return launch(cfg)
+		return launchOrDegrade(cfg)
 	}
 }
 

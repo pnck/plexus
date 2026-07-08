@@ -50,6 +50,35 @@ func (OSBuilder) UpLoopback() error {
 	return netlink.LinkSetUp(lo)
 }
 
+// SetupVeth configures the agent-side veth peer (created by the launcher and moved into
+// this netns): address + up + the single default route to the gateway (the host veth =
+// the control plane). The default route makes locally-generated egress reach the output
+// hook (where TPROXY marks it) and keeps the CP the only routable destination.
+func (OSBuilder) SetupVeth(peerIface, cidr, gateway string) error {
+	link, err := netlink.LinkByName(peerIface)
+	if err != nil {
+		return fmt.Errorf("find agent veth %s: %w", peerIface, err)
+	}
+	addr, err := netlink.ParseAddr(cidr)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", cidr, err)
+	}
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		return fmt.Errorf("addr %s on %s: %w", cidr, peerIface, err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("up %s: %w", peerIface, err)
+	}
+	gw := net.ParseIP(gateway)
+	if gw == nil {
+		return fmt.Errorf("bad gateway %q", gateway)
+	}
+	if err := netlink.RouteAdd(&netlink.Route{Gw: gw}); err != nil {
+		return fmt.Errorf("default route via %s: %w", gateway, err)
+	}
+	return nil
+}
+
 // ApplyEgressFence installs the nft egress fence and, when a protocol is redirected
 // (auditing on), the TPROXY reroute in the current netns.
 func (b OSBuilder) ApplyEgressFence(policy netpol.NetPolicy, params netpol.Params) error {
@@ -64,25 +93,17 @@ func (b OSBuilder) ApplyEgressFence(policy netpol.NetPolicy, params netpol.Param
 	return nil
 }
 
-// applyReroute mirrors netpol.GenerateIPRules for a loopback-only netns: a base
-// `default dev lo` route (so a locally-generated packet to an arbitrary address
-// survives the FIRST output route lookup and reaches the nft output hook, where its
-// TPROXY mark is set — the netns has no other link), then `ip rule add fwmark M lookup
-// T` + `ip route add local default dev lo table T`, so the marked packet is redelivered
-// locally to the transparent proxy.
+// applyReroute mirrors netpol.GenerateIPRules: `ip rule add fwmark M lookup T` + `ip
+// route add local default dev lo table T`, so a TPROXY-marked local packet is redelivered
+// locally to the transparent proxy. The FIRST output route lookup already succeeds via
+// the veth default route SetupVeth installed (the netns is not loopback-only), so no base
+// `default dev lo` is needed here.
 func (OSBuilder) applyReroute(params netpol.Params) error {
 	lo, err := netlink.LinkByName("lo")
 	if err != nil {
 		return fmt.Errorf("find lo: %w", err)
 	}
-
-	// Base default route via lo (main table): makes the initial output lookup succeed so
-	// marked traffic reaches the output hook. Unmarked traffic the fence does not accept
-	// is dropped by the nft policy in that same hook, so it never egresses.
 	_, defDst, _ := net.ParseCIDR("0.0.0.0/0")
-	if err := netlink.RouteAdd(&netlink.Route{Dst: defDst, LinkIndex: lo.Attrs().Index}); err != nil {
-		return fmt.Errorf("base route: %w", err)
-	}
 
 	rule := netlink.NewRule()
 	rule.Mark = params.Mark
