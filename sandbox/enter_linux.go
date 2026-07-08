@@ -42,9 +42,9 @@ func launchOrDegrade(cfg Config) error {
 		return launch(cfg)
 	}
 	if cfg.RequireNetFence {
-		return fmt.Errorf("sandbox: --require-net-fence set but CAP_NET_ADMIN is unavailable — grant it " +
-			"(`setcap cap_net_admin+ep <plexus>` / root / `--cap-add=NET_ADMIN` / systemd AmbientCapabilities), " +
-			"or drop --require-net-fence to run with host networking")
+		return fmt.Errorf("sandbox: --require-net-fence set but CAP_NET_ADMIN is unavailable — grant it via " +
+			"root / a privileged container / `--cap-add=NET_ADMIN` / systemd AmbientCapabilities (NOT `setcap`: a " +
+			"file-capability binary can't create the unprivileged userns the netns needs), or drop --require-net-fence")
 	}
 	slog.Warn("network fence disabled: CAP_NET_ADMIN unavailable — the agent runs on the HOST network with " +
 		"NO per-agent network isolation or egress audit; grant CAP_NET_ADMIN to enable the fence")
@@ -80,8 +80,9 @@ func launch(cfg Config) error {
 		_ = r.Close()
 		_ = w.Close()
 		return fmt.Errorf("sandbox: entering an unprivileged user+network namespace failed (%w) — "+
-			"`--sandbox` needs unprivileged user namespaces enabled; check "+
-			"`sysctl kernel.unprivileged_userns_clone` / `user.max_user_namespaces`", err)
+			"`--sandbox` needs unprivileged user namespaces enabled (`sysctl kernel.unprivileged_userns_clone` / "+
+			"`user.max_user_namespaces`). NOTE: if you granted CAP_NET_ADMIN via `setcap`, that IS the cause — a "+
+			"file-capability binary can't create an unprivileged userns; grant the cap via root / --cap-add=NET_ADMIN", err)
 	}
 	_ = r.Close() // the launcher keeps only the write end
 
