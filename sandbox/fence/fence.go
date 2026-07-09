@@ -126,7 +126,14 @@ func Build(p Plan, b Builder) error {
 			return fmt.Errorf("fence %s: %s: %w", p.AgentID, s.what, err)
 		}
 	}
-	if err := b.SpawnAgent(p.NFT.EgressPort, p.Agent); err != nil {
+	// Only open the transparent egress sockets when a protocol is actually redirected —
+	// same condition ApplyEgressFence gates its TPROXY reroute on. Under deny-all/reject
+	// nothing is marked-and-rerouted to them, so binding them would just be waste.
+	egressPort := p.NFT.EgressPort
+	if p.Net.Decide(netpol.TCP) != netpol.Redirect && p.Net.Decide(netpol.UDP) != netpol.Redirect {
+		egressPort = 0
+	}
+	if err := b.SpawnAgent(egressPort, p.Agent); err != nil {
 		return fmt.Errorf("fence %s: spawn agent: %w", p.AgentID, err)
 	}
 	return nil

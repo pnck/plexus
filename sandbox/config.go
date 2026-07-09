@@ -39,3 +39,29 @@ type Config struct {
 	Clearenv                         bool
 	Nameservers                      []string
 }
+
+// DefaultConfig returns a Config populated with the load-bearing sandbox defaults — the
+// veth names, per-agent CIDRs, gateway, control-plane address, egress port, fwmark, and
+// routing table — that, TAKEN TOGETHER, establish the full sandbox. It is the single
+// source of truth for these values: addSandboxFlags seeds its flag defaults from here, so
+// a Config built programmatically (not via the flag set) is equally valid and does not
+// fail at SetupVeth with empty veth/CIDR fields. Callers set AgentID and may override any
+// field. The zero-value knobs it deliberately leaves unset (MemMax/PidsMax/MaxConns = 0
+// "unset", UID/GID = 0 "launcher's mapping", provision paths = "" "skip") keep their
+// zero meaning.
+func DefaultConfig() Config {
+	return Config{
+		VethHost:   "plxh0",
+		VethPeer:   "plxa0",
+		HostCIDR:   "10.242.42.1/30",
+		AgentCIDR:  "10.242.42.2/30",
+		Gateway:    "10.242.42.1",
+		CP:         "10.242.42.1",
+		BusPort:    4222,
+		EgressPort: 1080,
+		Mark:       0x1,
+		Table:      100,
+		NetTCP:     "drop",
+		NetUDP:     "drop",
+	}
+}

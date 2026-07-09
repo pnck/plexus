@@ -16,6 +16,7 @@ type recorder struct {
 	calls       []string
 	fencePolicy netpol.NetPolicy
 	fenceParams netpol.Params
+	spawnPort   int    // the egressPort SpawnAgent was called with
 	failAt      string // method-name prefix to fail at ("" = never)
 }
 
@@ -38,7 +39,8 @@ func (r *recorder) ApplyEgressFence(pol netpol.NetPolicy, pr netpol.Params) erro
 func (r *recorder) LimitResources(agentID string, _ Limits) error {
 	return r.log("LimitResources " + agentID)
 }
-func (r *recorder) SpawnAgent(_ int, agent Cmd) error {
+func (r *recorder) SpawnAgent(egressPort int, agent Cmd) error {
+	r.spawnPort = egressPort
 	return r.log("SpawnAgent " + strings.Join(agent.Argv, ","))
 }
 
@@ -90,6 +92,30 @@ func TestBuildSequence(t *testing.T) {
 		if !strings.Contains(nft, sub) {
 			t.Fatalf("fence missing %q:\n%s", sub, nft)
 		}
+	}
+}
+
+// Egress sockets are opened only when a protocol is actually redirected: under deny-all
+// SpawnAgent gets egressPort 0 (nothing would ever reach the transparent proxy), and a
+// redirect plan passes the real port through.
+func TestBuildGatesEgressSocketsOnRedirect(t *testing.T) {
+	pr := testPlan() // TCP: Redirect
+	r := &recorder{}
+	if err := Build(pr, r); err != nil {
+		t.Fatalf("Build (redirect): %v", err)
+	}
+	if r.spawnPort != pr.NFT.EgressPort {
+		t.Fatalf("redirect: want egress port %d passed to SpawnAgent, got %d", pr.NFT.EgressPort, r.spawnPort)
+	}
+
+	pd := testPlan()
+	pd.Net = netpol.NetPolicy{} // zero = tcp/udp drop
+	rd := &recorder{}
+	if err := Build(pd, rd); err != nil {
+		t.Fatalf("Build (deny-all): %v", err)
+	}
+	if rd.spawnPort != 0 {
+		t.Fatalf("deny-all: want egress port 0 (no transparent sockets), got %d", rd.spawnPort)
 	}
 }
 
