@@ -1,5 +1,10 @@
 package sandbox
 
+import (
+	"fmt"
+	"hash/fnv"
+)
+
 // Config holds the --sandbox tuning knobs. Every field has a default that, TAKEN
 // TOGETHER, establishes the FULL sandbox — fs/namespace isolation, a deny-all network
 // fence (per-agent netns + veth to the CP), and a resource cgroup. The flags only ADJUST
@@ -63,5 +68,42 @@ func DefaultConfig() Config {
 		Table:      100,
 		NetTCP:     "drop",
 		NetUDP:     "drop",
+	}
+}
+
+// deriveAgentNet gives each agent its own veth pair + /30 so concurrent sandboxes don't
+// collide on the shared default (plxh0/plxa0 + 10.242.42.0/30 — a second agent would hit
+// "file exists" on LinkAdd and duplicate addresses). It only rewrites the net fields still
+// at the DefaultConfig base, so an explicit --veth-host/--agent-cidr/… override is kept.
+//
+// The mapping is DETERMINISTIC in AgentID: the launcher (which builds the veth) and the
+// re-exec'd fence stage (which configures the peer) run this independently and must agree
+// on the names/addresses. The pool is 10.242.0.0/16 carved into /30s (16384 agents) keyed
+// by an FNV hash of AgentID; the host end is the gateway (.1 of the block), the agent end
+// .2. Distinct AgentIDs can still birthday-collide on a slot — a live-set allocator is
+// future work; pass explicit net flags to pin an agent.
+func (c *Config) deriveAgentNet() {
+	if c.AgentID == "" {
+		return
+	}
+	base := DefaultConfig()
+	if c.VethHost != base.VethHost || c.VethPeer != base.VethPeer ||
+		c.HostCIDR != base.HostCIDR || c.AgentCIDR != base.AgentCIDR || c.Gateway != base.Gateway {
+		return // caller pinned the net explicitly — leave it
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(c.AgentID))
+	idx := h.Sum32() % 16384 // 2^14 /30 blocks in a /16
+	off := idx * 4           // block base offset within 10.242.0.0/16
+	third, fourth := byte(off>>8), byte(off&0xff)
+
+	gw := fmt.Sprintf("10.242.%d.%d", third, fourth+1)
+	c.Gateway = gw
+	c.HostCIDR = gw + "/30"
+	c.AgentCIDR = fmt.Sprintf("10.242.%d.%d/30", third, fourth+2)
+	c.VethHost = fmt.Sprintf("plxh%x", idx) // ≤ 8 chars, within IFNAMSIZ
+	c.VethPeer = fmt.Sprintf("plxa%x", idx)
+	if c.CP == base.CP { // CP defaults to the host veth (gateway) unless pinned
+		c.CP = gw
 	}
 }

@@ -61,6 +61,9 @@ type Provider interface {
 // the host-side stages exec away and never return here, so a nil return means "you are
 // inside the finished sandbox — proceed". Call it only when --sandbox is requested.
 func Enter(cfg Config) error {
+	// Give each agent its own veth/CIDR (deterministic in AgentID) so concurrent sandboxes
+	// don't collide; both the launcher and the re-exec'd fence stage derive the same values.
+	cfg.deriveAgentNet()
 	switch {
 	case os.Getenv(EnvTicket) != "":
 		return confine()
