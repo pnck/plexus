@@ -128,7 +128,15 @@ func (OSBuilder) applyNFT(policy netpol.NetPolicy, params netpol.Params) error {
 	if err != nil {
 		return err
 	}
+	return buildNFT(c, policy, params)
+}
 
+// buildNFT programs `table inet mesh` / `chain out` into c and flushes it, mirroring
+// netpol.GenerateNFT. It is split from applyNFT so a unit test can drive it with a
+// WithTestDial conn and assert the emitted rule count matches the golden text — locking
+// the programmatic builder to GenerateNFT without a kernel (a cap-dropped agent can't read
+// the applied ruleset back, so the lock has to be at build time).
+func buildNFT(c *nftables.Conn, policy netpol.NetPolicy, params netpol.Params) error {
 	drop := nftables.ChainPolicyDrop
 	table := c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: "mesh"})
 	chain := c.AddChain(&nftables.Chain{

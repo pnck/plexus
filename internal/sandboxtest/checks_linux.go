@@ -141,22 +141,25 @@ func checkSeccompActive() Result {
 // checkRlimitsLowered asserts the soft rlimits were lowered to the confinement floor.
 func checkRlimitsLowered() Result {
 	want := sandbox.DefaultConfinement().Rlimits
-	var nofile, nproc unix.Rlimit
+	var nofile, nproc, fsize unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &nofile); err != nil {
 		return fail("rlimit-lowered", "getrlimit NOFILE: "+err.Error())
 	}
 	if err := unix.Getrlimit(unix.RLIMIT_NPROC, &nproc); err != nil {
 		return fail("rlimit-lowered", "getrlimit NPROC: "+err.Error())
 	}
-	// The floor is clamped to the inherited hard limit, so assert it is no HIGHER than the
+	if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &fsize); err != nil {
+		return fail("rlimit-lowered", "getrlimit FSIZE: "+err.Error())
+	}
+	// The floor is clamped to the inherited hard limit, so assert each is no HIGHER than the
 	// floor (proving it was lowered from the host default), and matches when the host hard
 	// limit allows the exact floor.
-	if nofile.Cur <= want.NOFILE && nproc.Cur <= want.NPROC {
-		return pass("rlimit-lowered", fmt.Sprintf("NOFILE.cur=%d(<=%d) NPROC.cur=%d(<=%d)",
-			nofile.Cur, want.NOFILE, nproc.Cur, want.NPROC))
+	if nofile.Cur <= want.NOFILE && nproc.Cur <= want.NPROC && fsize.Cur <= want.FSIZE {
+		return pass("rlimit-lowered", fmt.Sprintf("NOFILE.cur=%d(<=%d) NPROC.cur=%d(<=%d) FSIZE.cur=%d(<=%d)",
+			nofile.Cur, want.NOFILE, nproc.Cur, want.NPROC, fsize.Cur, want.FSIZE))
 	}
-	return fail("rlimit-lowered", fmt.Sprintf("NOFILE.cur=%d(want<=%d) NPROC.cur=%d(want<=%d)",
-		nofile.Cur, want.NOFILE, nproc.Cur, want.NPROC))
+	return fail("rlimit-lowered", fmt.Sprintf("NOFILE.cur=%d(want<=%d) NPROC.cur=%d(want<=%d) FSIZE.cur=%d(want<=%d)",
+		nofile.Cur, want.NOFILE, nproc.Cur, want.NPROC, fsize.Cur, want.FSIZE))
 }
 
 // checkTmpfs asserts /tmp is an isolated tmpfs (bwrap --tmpfs /tmp), not the host /tmp.
