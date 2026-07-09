@@ -70,10 +70,22 @@ func launch(cfg Config) error {
 	cmd.Env = append(os.Environ(), envStage+"="+stageFenced, envVethReadyFD+"=3")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.ExtraFiles = []*os.File{r} // → child fd 3
+
+	// Map the userns root to the OWNER of this binary (fallback: the caller's uid/gid), so
+	// the re-exec'd self-binary — and the directories on its path — stay owner-accessible
+	// inside the userns. Under root a lone 0->0 map leaves a binary owned by an unprivileged
+	// user (and e.g. a 0750 /home/<user> on its path) unreachable to the confined agent,
+	// which then can't be re-exec'd (EACCES on stat / ENOENT on execvp).
+	hostUID, hostGID := os.Getuid(), os.Getgid()
+	if fi, err := os.Stat("/proc/self/exe"); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			hostUID, hostGID = int(st.Uid), int(st.Gid)
+		}
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
-		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
-		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostUID, Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostGID, Size: 1}},
 		GidMappingsEnableSetgroups: false, // an unprivileged gid map requires setgroups=deny
 	}
 	if err := cmd.Start(); err != nil {
@@ -298,8 +310,19 @@ func planFor(cfg Config) (fence.Plan, error) {
 			Mark: cfg.Mark, Table: cfg.Table, MaxConns: cfg.MaxConns,
 		},
 		Limits: fence.Limits{MemoryMax: cfg.MemMax, PidsMax: cfg.PidsMax},
-		Agent:  fence.Cmd{Argv: os.Args, Env: env},
+		Agent:  fence.Cmd{Argv: agentArgv(), Env: env},
 	}, nil
+}
+
+// agentArgv is os.Args with argv[0] resolved to the absolute self-path, so the fence->jail
+// re-exec and bwrap's exec of the agent don't depend on cwd (the launch argv[0] may be
+// relative, e.g. `dl/plexus-linux-amd64`).
+func agentArgv() []string {
+	argv := append([]string(nil), os.Args...)
+	if exe, err := os.Executable(); err == nil {
+		argv[0] = exe
+	}
+	return argv
 }
 
 // strippedEnv returns os.Environ() with the named variables removed.
