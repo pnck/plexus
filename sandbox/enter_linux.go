@@ -71,21 +71,17 @@ func launch(cfg Config) error {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.ExtraFiles = []*os.File{r} // → child fd 3
 
-	// Map the userns root to the OWNER of this binary (fallback: the caller's uid/gid), so
-	// the re-exec'd self-binary — and the directories on its path — stay owner-accessible
-	// inside the userns. Under root a lone 0->0 map leaves a binary owned by an unprivileged
-	// user (and e.g. a 0750 /home/<user> on its path) unreachable to the confined agent,
-	// which then can't be re-exec'd (EACCES on stat / ENOENT on execvp).
-	hostUID, hostGID := os.Getuid(), os.Getgid()
-	if fi, err := os.Stat("/proc/self/exe"); err == nil {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-			hostUID, hostGID = int(st.Uid), int(st.Gid)
-		}
-	}
+	// Map the userns root to the caller's own uid/gid (0->0 under root). The child is
+	// ns-root of the userns and so holds CAP_NET_ADMIN over the netns it owns — which it
+	// needs to bring lo up and build the veth/nft fence (mapping the root to a different,
+	// unprivileged host uid was observed to lose that authority). The consequence is that
+	// the re-exec'd self-binary must live where the confined agent can still traverse+exec
+	// it at this uid: deploy plexus on a world-traversable path (e.g. /usr/local/bin), not
+	// under a 0750 home dir owned by a uid that isn't mapped into the userns.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
-		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostUID, Size: 1}},
-		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostGID, Size: 1}},
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 		GidMappingsEnableSetgroups: false, // an unprivileged gid map requires setgroups=deny
 	}
 	if err := cmd.Start(); err != nil {

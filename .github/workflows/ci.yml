@@ -215,11 +215,16 @@ jobs:
           bin=$(find dl -name "plexus-linux-${{ matrix.arch }}" -type f | head -1)
           test -n "$bin" || { echo "::error::built binary not found in the downloaded artifact"; exit 1; }
           chmod +x "$bin"
+          # Install to a world-traversable system path. Under the fence the userns root maps
+          # to root (0->0) so the binary's owner/path must be reachable by root — the artifact
+          # sits under a 0750 $HOME, which the confined agent can't traverse to re-exec itself.
+          # /usr/local/bin mirrors a real deployment and is reachable by any uid.
+          sudo install -m0755 "$bin" /usr/local/bin/plexus
 
           # (1) Degraded path — NO CAP_NET_ADMIN: the network fence is skipped, the agent
           # runs on the host network (fs/seccomp still isolate), and it WARNS. It must still
           # reach the confined stage.
-          set +e; timeout 25 "$bin" run --sandbox --id ci-degraded >degraded.log 2>&1; set -e
+          set +e; timeout 25 /usr/local/bin/plexus run --sandbox --id ci-degraded >degraded.log 2>&1; set -e
           echo "----- degraded (no CAP_NET_ADMIN) -----"; cat degraded.log; echo "----------"
           grep -q "network fence disabled" degraded.log || { echo "::error::degraded run must warn 'network fence disabled'"; exit 1; }
           grep -q "sandbox active" degraded.log        || { echo "::error::degraded run must still reach the confined stage"; exit 1; }
@@ -229,7 +234,7 @@ jobs:
           # so the cap must come from root / a privileged container / --cap-add=NET_ADMIN.
           # launch -> fence (veth + nft + TPROXY) -> jail -> confine runs the whole chain;
           # redirect exercises the TPROXY reroute. Success is the marker, not the exit code.
-          set +e; sudo timeout 25 "$bin" run --sandbox --net-tcp redirect --net-udp redirect --id ci-smoke >smoke.log 2>&1; set -e
+          set +e; sudo timeout 25 /usr/local/bin/plexus run --sandbox --net-tcp redirect --net-udp redirect --id ci-smoke >smoke.log 2>&1; set -e
           echo "----- full fence (root / CAP_NET_ADMIN) -----"; cat smoke.log; echo "----------"
           if grep -q "sandbox active" smoke.log; then
             echo "launch -> fence(veth/nft/TPROXY) -> jail -> confine all succeeded"
@@ -303,12 +308,16 @@ jobs:
           # (and the plexus it execs) is root; the launcher's cap is dropped before the agent
           # runs, which the no-caps check asserts.
           go test -c -tags sandboxtest -o enforce.test ./internal/sandboxtest
-          # Plant a "secret" under a ro-bound host path and mask it, so the fs-masked
-          # check proves masking actually HIDES it inside the sandbox (fs-isolation).
-          probe="$HOME/plexus-mask-probe"
+          # Install to a world-traversable path: the fence maps the userns root to root, so
+          # the re-exec'd agent must reach the binary — the build dir sits under a 0750 $HOME.
+          sudo install -m0755 plexus /usr/local/bin/plexus
+          # Plant a "secret" under a ro-bound host path and mask it, so the fs-masked check
+          # proves masking actually HIDES it inside the sandbox. Use /var/tmp (world-x, not a
+          # bwrap-masked mount, and traversable by the root-mapped agent — unlike a 0750 $HOME).
+          probe=/var/tmp/plexus-mask-probe
           mkdir -p "$probe" && echo "top-secret" > "$probe/secret"
           set +e
-          sudo env PLEXUS_BIN="$PWD/plexus" PLEXUS_SELFTEST_MASK="$probe" \
+          sudo env PLEXUS_BIN=/usr/local/bin/plexus PLEXUS_SELFTEST_MASK="$probe" \
             ./enforce.test -test.run TestSandboxEnforcement -test.v 2>&1 | tee enforce.out
           rc=${PIPESTATUS[0]}
           set -e
