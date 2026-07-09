@@ -2,11 +2,12 @@ package sandbox
 
 // Config holds the --sandbox tuning knobs. Every field has a default that, TAKEN
 // TOGETHER, establishes the FULL sandbox — fs/namespace isolation, a deny-all network
-// fence (a loopback-only netns), and a resource cgroup. The flags only ADJUST that
-// default; none of them switches a feature off. `--sandbox` with no flags is a complete
-// sandbox. AgentID is set by the launching command (it names the cgroup and is the
-// audit key). The sandbox is established from an UNPRIVILEGED user namespace, so it
-// needs no host capability — any ordinary user can start it.
+// fence (per-agent netns + veth to the CP), and a resource cgroup. The flags only ADJUST
+// that default; none of them switches a feature off. `--sandbox` with no flags is a
+// complete sandbox. AgentID is set by the launching command (it names the cgroup and is
+// the audit key). The core sandbox is established from an UNPRIVILEGED user namespace
+// (zero host capability); the network fence additionally needs CAP_NET_ADMIN and
+// degrades gracefully without it (§ implement-design 5.6.9).
 type Config struct {
 	AgentID string
 

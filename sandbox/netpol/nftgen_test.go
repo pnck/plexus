@@ -102,11 +102,11 @@ func TestGenerateIPRules(t *testing.T) {
 func TestGenerateNFT_RejectsCPInjection(t *testing.T) {
 	for _, bad := range []string{
 		"1.2.3.4 accept\n    ip daddr 0.0.0.0/0", // newline -> extra allow-all rule
-		"1.2.3.4 accept",                          // whitespace -> trailing tokens
-		"1.2.3.4}",                                // brace -> break out of the chain/table
-		"evil.example.com",                        // hostname, not an IP
-		"",                                        // empty
-		"::1",                                     // IPv6 (rule family is ip/IPv4)
+		"1.2.3.4 accept",                         // whitespace -> trailing tokens
+		"1.2.3.4}",                               // brace -> break out of the chain/table
+		"evil.example.com",                       // hostname, not an IP
+		"",                                       // empty
+		"::1",                                    // IPv6 (rule family is ip/IPv4)
 	} {
 		if _, err := GenerateNFT(NetPolicy{TCP: Redirect}, Params{CP: bad, BusPort: 4222, Mark: 1, Table: 100}); err == nil {
 			t.Fatalf("GenerateNFT must reject CP %q", bad)

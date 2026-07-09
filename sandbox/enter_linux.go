@@ -123,8 +123,9 @@ func launch(cfg Config) error {
 // gives the host end HostCIDR + up so it is the agent's gateway to the control plane. It
 // needs CAP_NET_ADMIN (the network-fence prerequisite), held by this launcher process.
 func setupHostVeth(cfg Config, childPid int) error {
-	runtime.LockOSThread()
-
+	// No LockOSThread / setns here: the launcher stays in the host netns and moves the
+	// peer into the child by fd (LinkSetNsFd on /proc/<pid>/ns/net), so no thread-netns
+	// pinning is needed.
 	nsf, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", childPid))
 	if err != nil {
 		return fmt.Errorf("open child netns: %w", err)

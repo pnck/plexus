@@ -109,9 +109,10 @@ func checkNoCaps() Result {
 }
 
 // checkExternalEgressBlocked asserts a direct connection to an external host does NOT
-// succeed — under the deny-all default the netns has no route out, so the dial fails.
-// (The self-test runs deny-all precisely so this assertion is unambiguous; the redirect
-// path is covered by the run-based smoke.)
+// succeed — under the deny-all default the nft `policy drop` drops the packet (the veth
+// gives the netns a default route, so it is the fence, not the absence of a route, that
+// blocks). (The self-test runs deny-all precisely so this assertion is unambiguous; the
+// redirect path is covered by the run-based smoke.)
 func checkExternalEgressBlocked() Result {
 	c, err := net.DialTimeout("tcp", "1.1.1.1:53", 3*time.Second)
 	if err != nil {

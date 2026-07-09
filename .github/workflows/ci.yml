@@ -247,7 +247,7 @@ jobs:
   # proves the sandbox STARTS, this proves it CONFINES: it builds a sandboxtest-tagged
   # plexus (embedding bwrap from the build job's cache) and runs `sandbox-selftest`, which
   # enters launch->fence->jail->confine and asserts each isolation property from inside
-  # (netns loopback-only, external egress fenced, seccomp active, rlimits lowered, /tmp
+  # (netns fenced to lo + one veth to the CP, external egress fenced, seccomp active, rlimits lowered, /tmp
   # tmpfs, /proc procfs, cgroup when delegated). The build tag keeps all of this out of
   # production and local default builds.
   sandbox-enforce:

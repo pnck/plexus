@@ -40,8 +40,8 @@ func (p *Proxy) dialRelay() (net.Conn, error) {
 	return d.Dial("tcp", p.Relay)
 }
 
-// ServeTCP accepts TPROXY-intercepted TCP connections from ln (opened with
-// ListenTransparentTCP) and relays each. It returns when ln is closed.
+// ServeTCP accepts TPROXY-intercepted TCP connections from ln (the inherited
+// IP_TRANSPARENT listen fd) and relays each. It returns when ln is closed.
 func (p *Proxy) ServeTCP(ln net.Listener) error {
 	for {
 		c, err := ln.Accept()
@@ -130,7 +130,7 @@ func pipe(a, b net.Conn) {
 	<-done
 }
 
-// ServeUDP receives TPROXY-intercepted datagrams on uc (from ListenTransparentUDP),
+// ServeUDP receives TPROXY-intercepted datagrams on uc (the inherited IP_TRANSPARENT fd),
 // relays allowed ones to the CP over a per-source tunnel, and spoofs replies back so
 // they appear to come from the real destination. It returns when uc is closed.
 func (p *Proxy) ServeUDP(uc *net.UDPConn) error {

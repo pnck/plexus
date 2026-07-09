@@ -1,20 +1,26 @@
-// Package sandbox establishes an agent's isolation with NO host privilege: any
-// ordinary user can start it. Entry is a chain of process re-execs, each adding one
-// layer of confinement, selected by the handover env the previous stage set:
+// Package sandbox establishes an agent's isolation as a chain of process re-execs, each
+// adding one layer of confinement, selected by the handover env the previous stage set:
 //
 //	launch   (host netns)          fork this command into a fresh USER+NETWORK namespace
-//	                               (CLONE_NEWUSER|CLONE_NEWNET); the launcher stays a
-//	                               thin host-netns supervisor. Zero host capabilities.
-//	fence    (in the new netns)    build the network fence + resource cgroup with the
-//	                               free in-userns CAP_NET_ADMIN, then exec onward.
-//	jail     (bwrap)               build the fs/mount/user/pid/ipc isolation, then exec.
+//	                               (CLONE_NEWUSER|CLONE_NEWNET); the launcher stays a thin
+//	                               host-netns supervisor and, holding CAP_NET_ADMIN, builds
+//	                               the veth into the child's netns (the network tier).
+//	fence    (in the new netns)    configure the agent-side veth + nft/TPROXY egress fence
+//	                               + resource cgroup with the in-userns CAP_NET_ADMIN, then
+//	                               exec onward.
+//	jail     (bwrap)               build the fs/mount/user/pid/ipc isolation (--cap-drop
+//	                               ALL, so the agent runs zero-cap), then exec.
 //	confine  (in the jail)         drop rlimits + load seccomp, then return to run.
 //
-// The only hard prerequisite is unprivileged user namespaces — the same thing bwrap
-// itself needs. No CAP_NET_ADMIN / CAP_SYS_ADMIN / root is ever asked of the host: the
-// network fence's CAP_NET_ADMIN is held for free inside the user namespace that owns
-// the network namespace, and there is no named netns / veth, so CAP_SYS_ADMIN never
-// enters. On platforms without a wired backend, Enter refuses cleanly at launch.
+// Two tiers, gated on CAP_NET_ADMIN (§ implement-design 5.6.9):
+//   - the CORE sandbox (fs/user/pid/ipc ns + seccomp + rlimit) needs only unprivileged
+//     user namespaces — the same thing bwrap itself needs — and zero host capability;
+//   - the NETWORK fence (per-agent netns + veth to the CP + nft/TPROXY audit) needs
+//     CAP_NET_ADMIN, held by the launcher solely to BUILD the veth and dropped before the
+//     agent runs. Without it the fence degrades (host network + warn); the agent is
+//     confined either way. No CAP_SYS_ADMIN / setns / named netns is ever used.
+//
+// On platforms without a wired backend, Enter refuses cleanly at launch.
 package sandbox
 
 import (

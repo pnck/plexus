@@ -23,14 +23,15 @@ import (
 	"plexus/sandbox/netpol"
 )
 
-// OSBuilder is the real Builder. It runs INSIDE the anonymous, loopback-only network
-// namespace the launch stage created via an unprivileged user namespace, so it is
-// ns-root of the userns that owns this netns and holds CAP_NET_ADMIN *scoped to it*
-// for free — no host capability. It drives the kernel directly through netlink
-// (vishvananda/netlink for lo + the TPROXY route/rule) and google/nftables for the
-// egress fence, with NO ip / nft / tc binaries, keeping plexus a single self-contained
-// executable. A writable cgroup subtree is optional — LimitResources degrades to the
-// rlimit floor when it is absent.
+// OSBuilder is the real Builder. It runs INSIDE the anonymous network namespace the
+// launch stage created via an unprivileged user namespace (holding lo + the veth peer
+// the launcher moved in), so it is ns-root of the userns that owns this netns and holds
+// CAP_NET_ADMIN *scoped to it* for free — no host capability of its own (the launcher
+// spent host CAP_NET_ADMIN to build the veth). It drives the kernel directly through
+// netlink (vishvananda/netlink for lo + the agent-side veth + the TPROXY route/rule) and
+// google/nftables for the egress fence, with NO ip / nft / tc binaries, keeping plexus a
+// single self-contained executable. A writable cgroup subtree is optional —
+// LimitResources degrades to the rlimit floor when it is absent.
 //
 // The nft builder mirrors the golden netpol.GenerateNFT text rule-for-rule (deny-all
 // policy, loopback/bus accept, ct established, ct-count cap, per-protocol redirect
@@ -277,7 +278,7 @@ func be16(v int) []byte {
 // this process's own cgroup, sets memory/pids, joins this process (so the exec'd agent
 // inherits it), and degrades to ErrUnavailable when no delegated cgroup-v2 subtree is
 // writable (e.g. an unprivileged container) — in which case the sandbox falls back to
-// the rlimit floor rather than failing. (CPUMax is not yet handled by the shared layer.)
+// the rlimit floor rather than failing.
 func (OSBuilder) LimitResources(agentID string, lim Limits) error {
 	if _, err := cgroup.Apply(agentID, cgroup.Limits{MemoryMax: lim.MemoryMax, PidsMax: lim.PidsMax}); err != nil {
 		if errors.Is(err, cgroup.ErrUnavailable) {

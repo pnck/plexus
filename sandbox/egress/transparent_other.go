@@ -12,10 +12,6 @@ import (
 // Linux netns.
 var errLinuxOnly = fmt.Errorf("egress: transparent proxy is supported only on linux")
 
-func ListenTransparentTCP(string) (net.Listener, error) { return nil, errLinuxOnly }
-
-func ListenTransparentUDP(string) (*net.UDPConn, error) { return nil, errLinuxOnly }
-
 func readUDPOrigDst(*net.UDPConn, []byte, []byte) (int, *net.UDPAddr, *net.UDPAddr, error) {
 	return 0, nil, nil, errLinuxOnly
 }

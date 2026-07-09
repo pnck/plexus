@@ -1,8 +1,9 @@
 // Package sandboxtest holds the in-sandbox enforcement self-test: code that runs INSIDE
 // a fully established sandbox and asserts each isolation property actually HOLDS — not
 // just that the sandbox started. `run --sandbox` reaching the confined stage is a
-// liveness signal; these checks are the enforcement signal (the netns is loopback-only,
-// external egress is fenced, seccomp is active, rlimits are lowered, /tmp is a tmpfs,
+// liveness signal; these checks are the enforcement signal (the netns is fenced to lo +
+// a single veth to the CP, external egress is fenced, seccomp is active, rlimits are
+// lowered, /tmp is a tmpfs,
 // /proc is the pid-ns proc, and the cgroup is applied when delegation is available).
 //
 // The checks (and the integration test that drives them) are gated behind the

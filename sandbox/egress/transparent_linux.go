@@ -3,58 +3,19 @@
 package egress
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-// transparentTCP sets IP_TRANSPARENT on a listening socket.
-func transparentTCP(_, _ string, c syscall.RawConn) error {
-	var serr error
-	if err := c.Control(func(fd uintptr) {
-		serr = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1)
-	}); err != nil {
-		return err
-	}
-	return serr
-}
-
-// ListenTransparentTCP opens a TCP listener with IP_TRANSPARENT: the kernel delivers
-// TPROXY-intercepted connections here with the ORIGINAL destination as the accepted
-// socket's local address (flow doc §6.9), so no per-connection syscall is needed to
-// recover it. addr is the local egress port the nft rules mark-and-reroute to.
-func ListenTransparentTCP(addr string) (net.Listener, error) {
-	lc := net.ListenConfig{Control: transparentTCP}
-	return lc.Listen(context.Background(), "tcp", addr)
-}
-
-// ListenTransparentUDP opens a UDP socket with IP_TRANSPARENT + IP_RECVORIGDSTADDR,
-// so recvmsg reveals each intercepted datagram's original destination.
-func ListenTransparentUDP(addr string) (*net.UDPConn, error) {
-	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
-		var serr error
-		if err := c.Control(func(fd uintptr) {
-			if e := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); e != nil {
-				serr = e
-				return
-			}
-			serr = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1)
-		}); err != nil {
-			return err
-		}
-		return serr
-	}}
-	pc, err := lc.ListenPacket(context.Background(), "udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return pc.(*net.UDPConn), nil
-}
+// The IP_TRANSPARENT egress sockets are opened privileged in the netns by
+// fence.openTransparent (while the fence stage still holds the in-userns CAP_NET_ADMIN)
+// and passed to the confined agent as inherited fds; the proxy serves them via
+// ServeInherited. The helpers below recover per-datagram original destinations and send
+// spoofed replies on those already-transparent fds.
 
 // readUDPOrigDst reads one intercepted datagram, returning its length, sender, and
 // the ORIGINAL destination (from the IP_RECVORIGDSTADDR control message).

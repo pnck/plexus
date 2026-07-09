@@ -1,12 +1,13 @@
 // Package fence builds the network + resource isolation an agent is born into, from
 // INSIDE the fresh user+network namespace the launch stage created. It is the second
-// stage of the sandbox entry chain (launch → fence → jail → confine) and, like every
-// stage, uses NO host capability: the process is ns-root of the user namespace that
-// OWNS this network namespace, so it holds CAP_NET_ADMIN *scoped to the netns* for
-// free — enough to bring up loopback, load the nft egress fence, install the TPROXY
-// reroute, and open the IP_TRANSPARENT sockets. The netns is loopback-only (there is
-// no veth: the control plane is reached over inherited fds, not an IP route), which is
-// also why no named netns / bind-mount is needed and CAP_SYS_ADMIN never enters.
+// stage of the sandbox entry chain (launch → fence → jail → confine): the process is
+// ns-root of the user namespace that OWNS this network namespace, so it holds
+// CAP_NET_ADMIN *scoped to the netns* for free (no host capability of its own) — enough
+// to bring up loopback, configure the agent-side veth the launcher moved in, load the
+// nft egress fence, install the TPROXY reroute, and open the IP_TRANSPARENT sockets. The
+// netns reaches the control plane over that veth (an IP route to the gateway); the
+// launcher spent host CAP_NET_ADMIN to build the veth pair. No named netns / bind-mount
+// / setns is used, so CAP_SYS_ADMIN never enters.
 //
 // The kernel work is behind the Builder interface: the real netlink/nftables/cgroup
 // implementation is swapped in at runtime (Linux), while the orchestration SEQUENCE is
@@ -23,9 +24,8 @@ import (
 // means "leave unset". When cgroup delegation is unavailable the Builder degrades to
 // the rlimit floor applied later in the confine stage.
 type Limits struct {
-	MemoryMax int64  // memory.max, bytes; 0 = unset
-	PidsMax   int64  // pids.max; 0 = unset
-	CPUMax    string // cpu.max, "quota period"; "" = unset
+	MemoryMax int64 // memory.max, bytes; 0 = unset
+	PidsMax   int64 // pids.max; 0 = unset
 }
 
 // Plan is the startup-fixed input Build needs to fence one agent. Every value comes
@@ -62,9 +62,9 @@ type Cmd struct {
 	Env  []string
 }
 
-// Builder performs the fence operations, all inside the CURRENT (userns-owned,
-// loopback-only) network namespace — there is no netns argument because the process is
-// already in the target netns. Every method is fail-fast: an error aborts Build before
+// Builder performs the fence operations, all inside the CURRENT (userns-owned) network
+// namespace — there is no netns argument because the process is already in the target
+// netns. Every method is fail-fast: an error aborts Build before
 // the agent is spawned. The real implementation is Linux-only and needs only the
 // in-userns CAP_NET_ADMIN (no host capability) plus, optionally, a delegated cgroup
 // subtree; tests drive a recording fake.
@@ -80,9 +80,9 @@ type Builder interface {
 	SetupVeth(peerIface, cidr, gateway string) error
 	// ApplyEgressFence installs the egress fence from the immutable NetPolicy + Params:
 	// the nft ruleset (deny-all, bus-direct, redirect→TPROXY mark, ct count) and, when a
-	// protocol is redirected (auditing on), the TPROXY reroute — the fwmark rule, the
-	// `local default dev lo` table, and a base default route via lo so locally-generated
-	// packets reach the output hook in a netns that has no other link.
+	// protocol is redirected (auditing on), the TPROXY reroute — the fwmark rule and the
+	// `local default dev lo` table. The first output-route lookup is carried by the veth
+	// default route SetupVeth installed, so no base default-via-lo route is needed.
 	ApplyEgressFence(policy netpol.NetPolicy, params netpol.Params) error
 	// LimitResources creates the per-agent cgroup and writes its ceilings, degrading to
 	// the rlimit floor (a nil error) when no cgroup subtree is delegated.
@@ -95,7 +95,7 @@ type Builder interface {
 	SpawnAgent(egressPort int, agent Cmd) error
 }
 
-// Build fences one agent inside the userns-owned, loopback-only netns:
+// Build fences one agent inside the userns-owned netns:
 //
 //  1. validate the fence params (pure, fail-closed) — never build a kernel object for
 //     a plan whose nft / ip-rules we cannot even produce;

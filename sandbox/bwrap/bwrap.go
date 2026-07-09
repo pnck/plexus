@@ -116,8 +116,16 @@ func (p *Provider) Enter(ticketPath string, extraArgs []string) error {
 		bwrapArgs = append(bwrapArgs, extraArgs...)
 	}
 
+	// The agent argv is this process's own os.Args, but argv[0] is resolved to the
+	// absolute self-path: bwrap execvp's it INSIDE the sandbox (often after --chdir to
+	// the workspace), so a relative launch argv[0] (e.g. `dl/plexus-linux-amd64`) would
+	// otherwise fail to resolve. This covers both the fenced and the degraded entry paths.
+	agentArgv := append([]string(nil), os.Args...)
+	if exe, err := os.Executable(); err == nil {
+		agentArgv[0] = exe
+	}
 	bwrapArgs = append(bwrapArgs, "--")
-	bwrapArgs = append(bwrapArgs, os.Args...)
+	bwrapArgs = append(bwrapArgs, agentArgv...)
 
 	return syscall.Exec(bwrapPath, bwrapArgs, os.Environ())
 }
